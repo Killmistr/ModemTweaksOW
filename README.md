@@ -1,4 +1,4 @@
-Test utild for QC modems (qmi pref) 
+Test utils for QC modems (qmi pref) 
 
 Description https://t.me/lint_electronics/47 
 
