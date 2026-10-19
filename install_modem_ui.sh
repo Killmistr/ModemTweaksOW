@@ -2225,6 +2225,22 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
         f_enb:close()
         is_daemon_enabled = (e_val and e_val:match("yes") ~= nil)
     end
+
+    ui_version = "v0.1"
+    local f_uiv = io.open("/etc/modem_ui_version", "r")
+    if f_uiv then
+        local v = f_uiv:read("*l")
+        f_uiv:close()
+        if v and v ~= "" then ui_version = v:match("^%s*(.-)%s*$") end
+    end
+
+    recovery_version = "v0.1"
+    local f_recv = io.open("/etc/modem_recovery_version", "r")
+    if f_recv then
+        local v = f_recv:read("*l")
+        f_recv:close()
+        if v and v ~= "" then recovery_version = v:match("^%s*(.-)%s*$") end
+    end
 %>
 
 <div class="cbi-section">
@@ -2278,7 +2294,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     </div>
     
     <div style="margin-top: 20px; border-top: 1px solid #334155; padding-top: 15px;">
-        <button type="button" id="save_logs_btn" onclick="saveLossLogs();" style="display: inline-block; padding: 8px 20px; background-color: #8b5cf6; color: #ffffff; border: 1px solid #7c3aed; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s ease;" onmouseover="this.style.background='#7c3aed'" onmouseout="this.style.background='#8b5cf6'">Сохранить логи</button>
+        <button type="button" id="save_logs_btn_banner" onclick="saveLossLogs();" style="display: inline-block; padding: 8px 20px; background-color: #8b5cf6; color: #ffffff; border: 1px solid #7c3aed; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s ease;" onmouseover="this.style.background='#7c3aed'" onmouseout="this.style.background='#8b5cf6'">Сохранить логи</button>
     </div>
 </div>
 
@@ -2722,6 +2738,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
             </div>
         </div>
     </div>
+</div> <!-- end of Speed Graph Section -->
 </div> <!-- end of modem_data_container -->
 
 <div class="sim-dash" style="background-color: #0f172a; border-left: 4px solid #3b82f6; padding: 20px; margin-top: 30px;">
@@ -2873,11 +2890,11 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
         <div style="display: flex; flex-direction: column; gap: 6px;">
             <button type="button" id="btn_update_ui" onclick="updateModemUI();" style="display: inline-block; padding: 8px 16px; background-color: #059669; color: #ffffff; border: 1px solid #10b981; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#047857'" onmouseout="this.style.background='#059669'">Обновить панель управления модемом</button>
-            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="ui_version_badge" style="color: #34d399; font-weight: bold;">v0.1</span></div>
+            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="ui_version_badge" style="color: #34d399; font-weight: bold;"><%=ui_version%></span></div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
             <button type="button" id="btn_update_recovery" onclick="updateModemRecovery();" style="display: inline-block; padding: 8px 16px; background-color: #2563eb; color: #ffffff; border: 1px solid #3b82f6; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#1d4ed8'" onmouseout="this.style.background='#2563eb'">Обновить службу мониторинга</button>
-            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="recovery_version_badge" style="color: #60a5fa; font-weight: bold;">v0.1</span></div>
+            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="recovery_version_badge" style="color: #60a5fa; font-weight: bold;"><%=recovery_version%></span></div>
         </div>
     </div>
 </div>
