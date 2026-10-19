@@ -14,6 +14,7 @@ local M = {}
 -- ============================================================================
 -- Configuration (User-Configurable)
 -- ============================================================================
+M.VERSION = "v0.1"
 M.CHECK_INTERVAL = 2            -- Seconds between check ticks
 M.IFACE_RESTART_COOLDOWN = 15   -- Cooldown after running 'ifup MODEM' (seconds)
 M.MM_RESTART_COOLDOWN = 20      -- Cooldown after restarting ModemManager (seconds)
@@ -340,6 +341,7 @@ local function write_metrics_json()
     local data = M.metrics
     local json_str = string.format([[
 {
+  "version": %q,
   "total_recovery_count": %d,
   "interface_recovery_count": %d,
   "rf_recovery_count": %d,
@@ -362,6 +364,7 @@ local function write_metrics_json()
   "modemmanager_status": %q
 }
 ]],
+        M.VERSION or "v0.1",
         data.total_recovery_count or 0,
         data.interface_recovery_count or 0,
         data.rf_recovery_count or 0,
@@ -1235,6 +1238,7 @@ echo "Configuring permissions and services..."
 chmod +x /usr/bin/modem_recovery_daemon.lua
 chmod +x /etc/init.d/modem_recovery
 
+echo "v0.1" > /etc/modem_recovery_version
 /etc/init.d/modem_recovery enable
 /etc/init.d/modem_recovery restart
 
