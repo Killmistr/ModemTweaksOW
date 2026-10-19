@@ -436,7 +436,40 @@ function action_recovery_service()
     luci.http.write_json({success = success})
 end
 
+local UI_VERSION = "v0.1"
+
+local function read_version_file(path, fallback)
+    local f = io.open(path, "r")
+    if f then
+        local content = f:read("*a")
+        f:close()
+        if content then
+            content = content:gsub("^%s*", ""):gsub("%s*$", "")
+            if content ~= "" then return content end
+        end
+    end
+    return fallback
+end
+
+local function get_recovery_version()
+    local ver = read_version_file("/etc/modem_recovery_version", nil)
+    if ver then return ver end
+    local f = io.open("/tmp/modem_recovery_metrics.json", "r")
+    if f then
+        local content = f:read("*a")
+        f:close()
+        local success, parsed = pcall(json.parse, content)
+        if success and type(parsed) == "table" and parsed.version then
+            return parsed.version
+        end
+    end
+    return "v0.1"
+end
+
 function get_modem_data()
+    local ui_version = read_version_file("/etc/modem_ui_version", UI_VERSION)
+    local recovery_version = get_recovery_version()
+
     -- Read recovery metrics if available
     local recovery_metrics = {}
     local mf = io.open("/tmp/modem_recovery_metrics.json", "r")
@@ -456,7 +489,7 @@ function get_modem_data()
     local has_modem = (m_list:match("ModemManager1/Modem/(%d+)") ~= nil)
     
     if not has_modem then
-        local speed_data = {rx_speed = 0, tx_speed = 0, history = {}, loadavg = 0, load_history = {}}
+        local speed_data = {rx_speed = 0, tx_speed = 0, history = {}, loadavg = 0, load_history = {}, temp_history = {}, cpu_cores = {}, cores_history = {}}
         local s_f = io.open("/tmp/modem_speed.json", "r")
         if s_f then
             local content = s_f:read("*a")
@@ -481,7 +514,9 @@ function get_modem_data()
             recovery_metrics = recovery_metrics,
             recovery_daemon_running = is_recovery_running(),
             recovery_daemon_enabled = is_recovery_enabled(),
-            speed = speed_data
+            speed = speed_data,
+            ui_version = ui_version,
+            recovery_version = recovery_version
         })
         return
     end
@@ -931,7 +966,7 @@ function get_modem_data()
     local router_wifi_temp = get_cmd_output("awk '{print $1/1000 \" °C\"}' /sys/class/ieee80211/phy*/hwmon*/temp1_input 2>/dev/null")
 
     -- Read speed history
-    local speed_data = {rx_speed = 0, tx_speed = 0, history = {}, loadavg = 0, load_history = {}}
+    local speed_data = {rx_speed = 0, tx_speed = 0, history = {}, loadavg = 0, load_history = {}, temp_history = {}, cpu_cores = {}, cores_history = {}}
     local s_f = io.open("/tmp/modem_speed.json", "r")
     if s_f then
         local content = s_f:read("*a")
@@ -949,6 +984,8 @@ function get_modem_data()
         recovery_metrics = recovery_metrics,
         recovery_daemon_running = is_recovery_running(),
         recovery_daemon_enabled = is_recovery_enabled(),
+        ui_version = ui_version,
+        recovery_version = recovery_version,
         wdm_devs = wdm_devs,
         qmi_dev = qmi_dev,
         mmcli_idx = mmcli_idx,
@@ -2466,6 +2503,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     <div class="sim-row"><strong>Температура CPU:</strong> <span id="router_cpu_temp">-</span></div>
     <div class="sim-row"><strong>Температура WiFi:</strong> <span id="router_wifi_temp">-</span></div>
     <div class="sim-row"><strong>Load Average (1м / 5м / 15м):</strong> <span id="router_loadavg">-</span></div>
+    <div class="sim-row" id="row_cpu_cores"><strong>Утилизация ядер CPU:</strong> <span id="cores_util_summary">-</span></div>
     
     <!-- Temperature Chart Spoiler -->
     <div style="margin-top: 15px; border-top: 1px solid #262626; padding-top: 10px;">
@@ -2515,6 +2553,32 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
         <div id="load_graph_content" style="max-height: 0px; opacity: 0; overflow: hidden; transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out;">
             <div style="height: 120px; position: relative; background: #171717; border: 1px solid #374151; border-radius: 6px; padding: 10px 10px 0 10px; box-sizing: border-box; overflow: hidden; margin-top: 10px;">
                 <canvas id="load_chart" style="width: 100%; height: 100%; display: block;"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- CPU Cores Utilization Chart Spoiler -->
+    <div style="margin-top: 15px; border-top: 1px solid #262626; padding-top: 10px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;" onclick="toggleSpoiler('cores_graph_content', 'cores_graph_arrow')">
+            <h5 style="margin: 0; display: flex; align-items: center; gap: 8px; color: #e5e7eb; font-weight: normal; font-size: 13px;">
+                <svg id="cores_graph_arrow" style="width: 14px; height: 14px; transition: transform 0.3s ease; transform: rotate(0deg);" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path>
+                </svg>
+                График утилизации ядер CPU (%)
+            </h5>
+            <div style="display: flex; align-items: center; gap: 8px;" onclick="event.stopPropagation();">
+                <label for="cores_graph_range" style="color: #9ca3af; font-size: 11px;">Диапазон:</label>
+                <select id="cores_graph_range" onchange="updateCoresGraphRange()" style="background: #171717; color: #d1d5db; border: 1px solid #374151; padding: 1px 4px; border-radius: 4px; outline: none; cursor: pointer; font-size: 11px;">
+                    <option value="30">30 сек</option>
+                    <option value="60" selected>1 мин</option>
+                    <option value="300">5 мин</option>
+                </select>
+            </div>
+        </div>
+        
+        <div id="cores_graph_content" style="max-height: 0px; opacity: 0; overflow: hidden; transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out;">
+            <div style="height: 120px; position: relative; background: #171717; border: 1px solid #374151; border-radius: 6px; padding: 10px 10px 0 10px; box-sizing: border-box; overflow: hidden; margin-top: 10px;">
+                <canvas id="cores_chart" style="width: 100%; height: 100%; display: block;"></canvas>
             </div>
         </div>
     </div>
@@ -2666,9 +2730,15 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
 <div class="sim-dash" style="background-color: #1e293b; border-left: 4px solid #10b981; padding: 20px; margin-top: 30px;">
     <h4 style="margin: 0 0 15px 0; color: #ffffff;">🔄 Обновление компонентов системы</h4>
     <p style="color: #94a3b8; font-size: 13px; margin: 0 0 15px 0;">Загрузка и установка актуальных версий панели управления модемом и службы автоматического восстановления с GitHub.</p>
-    <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-        <button type="button" id="btn_update_ui" onclick="updateModemUI();" style="display: inline-block; padding: 8px 16px; background-color: #059669; color: #ffffff; border: 1px solid #10b981; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#047857'" onmouseout="this.style.background='#059669'">Обновить панель управления модемом</button>
-        <button type="button" id="btn_update_recovery" onclick="updateModemRecovery();" style="display: inline-block; padding: 8px 16px; background-color: #2563eb; color: #ffffff; border: 1px solid #3b82f6; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#1d4ed8'" onmouseout="this.style.background='#2563eb'">Обновить службу мониторинга</button>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+            <button type="button" id="btn_update_ui" onclick="updateModemUI();" style="display: inline-block; padding: 8px 16px; background-color: #059669; color: #ffffff; border: 1px solid #10b981; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#047857'" onmouseout="this.style.background='#059669'">Обновить панель управления модемом</button>
+            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="ui_version_badge" style="color: #34d399; font-weight: bold;">v0.1</span></div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+            <button type="button" id="btn_update_recovery" onclick="updateModemRecovery();" style="display: inline-block; padding: 8px 16px; background-color: #2563eb; color: #ffffff; border: 1px solid #3b82f6; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#1d4ed8'" onmouseout="this.style.background='#2563eb'">Обновить службу мониторинга</button>
+            <div style="font-size: 12px; color: #94a3b8; font-family: monospace;">Текущая версия: <span id="recovery_version_badge" style="color: #60a5fa; font-weight: bold;">v0.1</span></div>
+        </div>
     </div>
 </div>
 
@@ -2684,6 +2754,8 @@ let loadChartData = [];
 let loadGraphRange = 60;
 let tempChartData = [];
 let tempGraphRange = 60;
+let coresChartData = [];
+let coresGraphRange = 60;
 let isSimInteracted = false;
 let isActionPending = false;
 
@@ -2701,6 +2773,7 @@ function toggleSpoiler(contentId, arrowId) {
         localStorage.setItem(contentId, 'expanded');
         if (contentId === 'load_graph_content') setTimeout(drawLoadChart, 10);
         if (contentId === 'temp_graph_content') setTimeout(drawTempChart, 10);
+        if (contentId === 'cores_graph_content') setTimeout(drawCoresChart, 10);
     } else {
         content.style.maxHeight = '0px';
         content.style.opacity = '0';
@@ -2711,7 +2784,7 @@ function toggleSpoiler(contentId, arrowId) {
 }
 
 function initSpoilers() {
-    ['speed_graph_content', 'neighbors_content', 'nr_content', 'load_graph_content', 'temp_graph_content'].forEach(contentId => {
+    ['speed_graph_content', 'neighbors_content', 'nr_content', 'load_graph_content', 'temp_graph_content', 'cores_graph_content'].forEach(contentId => {
         let arrowId, defaultState;
         if (contentId === 'speed_graph_content') {
             arrowId = 'speed_graph_arrow';
@@ -2728,6 +2801,9 @@ function initSpoilers() {
             defaultState = 'collapsed';
         } else if (contentId === 'temp_graph_content') {
             arrowId = 'temp_graph_arrow';
+            defaultState = 'collapsed';
+        } else if (contentId === 'cores_graph_content') {
+            arrowId = 'cores_graph_arrow';
             defaultState = 'collapsed';
         }
         
@@ -2747,6 +2823,7 @@ function initSpoilers() {
                 content.classList.remove('collapsed');
                 if (contentId === 'load_graph_content') setTimeout(drawLoadChart, 150);
                 if (contentId === 'temp_graph_content') setTimeout(drawTempChart, 150);
+                if (contentId === 'cores_graph_content') setTimeout(drawCoresChart, 150);
             }
         }
     });
@@ -3133,20 +3210,30 @@ function drawTempChart() {
         return;
     }
 
-    let minVal = 30.0;
-    let maxVal = 85.0;
+    let minVal = Infinity;
+    let maxVal = -Infinity;
     
     filtered.forEach(d => {
-        if (d.cpu > maxVal) maxVal = d.cpu;
-        if (d.cpu < minVal) minVal = d.cpu;
-        if (d.wifi !== null) {
+        if (d.cpu !== undefined && d.cpu !== null && !isNaN(d.cpu)) {
+            if (d.cpu > maxVal) maxVal = d.cpu;
+            if (d.cpu < minVal) minVal = d.cpu;
+        }
+        if (d.wifi !== undefined && d.wifi !== null && !isNaN(d.wifi)) {
             if (d.wifi > maxVal) maxVal = d.wifi;
             if (d.wifi < minVal) minVal = d.wifi;
         }
     });
 
-    minVal = Math.floor(Math.max(0, minVal - 5));
-    maxVal = Math.ceil(maxVal + 5);
+    if (minVal === Infinity || maxVal === -Infinity) {
+        minVal = 30.0;
+        maxVal = 70.0;
+    } else {
+        const diff = maxVal - minVal;
+        const targetSpan = Math.max(6, Math.ceil(diff + 2)); // Minimum 6°C span so slight variations are clearly visible
+        const mid = (maxVal + minVal) / 2;
+        minVal = Math.max(0, Math.floor(mid - targetSpan / 2));
+        maxVal = Math.ceil(minVal + targetSpan);
+    }
 
     ctx.strokeStyle = '#262626';
     ctx.lineWidth = 1;
@@ -3202,7 +3289,7 @@ function drawTempChart() {
         
         for (let i = 0; i < filtered.length; i++) {
             const d = filtered[i];
-            if (d[key] === null) continue;
+            if (d[key] === null || d[key] === undefined || isNaN(d[key])) continue;
             const age = now - d.time;
             if (age > timeWindow) continue;
             
@@ -3231,6 +3318,132 @@ function drawTempChart() {
 
     drawLine('cpu', '#f87171');
     drawLine('wifi', '#60a5fa');
+}
+
+function updateCoresGraphRange() {
+    coresGraphRange = parseInt(g('cores_graph_range').value);
+    drawCoresChart();
+}
+
+function drawCoresChart() {
+    const canvas = g('cores_chart');
+    if (!canvas) return;
+    const rect = canvas.parentNode.getBoundingClientRect();
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = rect.height * window.devicePixelRatio;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+    const w = rect.width;
+    const h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const now = Math.floor(Date.now() / 1000);
+    const filtered = coresChartData.filter(d => (now - d.time) <= coresGraphRange);
+
+    if (filtered.length === 0) {
+        ctx.strokeStyle = '#262626';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for(let i=1; i<4; i++) {
+            let y = ((h - 25) / 4) * i;
+            ctx.moveTo(0, y); ctx.lineTo(w, y);
+        }
+        ctx.stroke();
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(_t('Ожидание данных утилизации ядер...'), w/2, (h - 25)/2);
+        return;
+    }
+
+    const minVal = 0;
+    const maxVal = 100;
+
+    ctx.strokeStyle = '#262626';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let i=1; i<4; i++) {
+        let y = ((h - 25) / 4) * i;
+        ctx.moveTo(0, y); ctx.lineTo(w, y);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('100%', 5, 12);
+    ctx.fillText('50%', 5, (h - 25)/2 + 4);
+    ctx.fillText('0%', 5, h - 30);
+
+    const coreColors = ['#f59e0b', '#06b6d4', '#a855f7', '#10b981', '#ec4899', '#3b82f6'];
+    const numCores = (filtered[filtered.length - 1].cores || []).length;
+
+    ctx.textAlign = 'right';
+    ctx.font = '10px monospace';
+    let legendX = w - 10;
+    for (let c = numCores - 1; c >= 0; c--) {
+        const color = coreColors[c % coreColors.length];
+        ctx.fillStyle = color;
+        ctx.fillText('CPU' + c, legendX, 12);
+        legendX -= 45;
+    }
+
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    
+    const ticksCount = 5;
+    for (let i = 0; i <= ticksCount; i++) {
+        const x = w - (i / ticksCount) * w;
+        const timeOffset = (i / ticksCount) * coresGraphRange;
+        let timeLabel = '';
+        if (timeOffset === 0) {
+            timeLabel = _t('Сейчас');
+        } else if (timeOffset >= 60) {
+            timeLabel = '-' + (timeOffset / 60).toFixed(0) + _t('м');
+        } else {
+            timeLabel = '-' + timeOffset.toFixed(0) + _t('с');
+        }
+        
+        ctx.strokeStyle = '#374151';
+        ctx.beginPath();
+        ctx.moveTo(x, h - 22);
+        ctx.lineTo(x, h - 26);
+        ctx.stroke();
+        
+        ctx.fillText(timeLabel, x, h - 8);
+    }
+
+    for (let c = 0; c < numCores; c++) {
+        const color = coreColors[c % coreColors.length];
+        const points = [];
+        const timeWindow = coresGraphRange;
+
+        for (let i = 0; i < filtered.length; i++) {
+            const d = filtered[i];
+            if (!d.cores || d.cores[c] === undefined || d.cores[c] === null || isNaN(d.cores[c])) continue;
+            const age = now - d.time;
+            if (age > timeWindow) continue;
+
+            const val = Math.max(0, Math.min(100, d.cores[c]));
+            const x = w - (age / timeWindow) * w;
+            const y = h - 25 - (val / 100) * (h - 45);
+            points.push({x, y});
+        }
+
+        if (points.length >= 2) {
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    }
 }
 
 
@@ -3400,6 +3613,13 @@ function fetchModemData() {
                     let rm = m % 60;
                     return h + 'ч ' + rm + 'м ' + r + 'с';
                 };
+
+                if (data.ui_version && g('ui_version_badge')) {
+                    g('ui_version_badge').innerText = data.ui_version;
+                }
+                if (data.recovery_version && g('recovery_version_badge')) {
+                    g('recovery_version_badge').innerText = data.recovery_version;
+                }
 
                 const recState = metrics.current_state || 'Starting';
                 const recStateEl = g('rec_current_state');
@@ -3666,17 +3886,22 @@ function fetchModemData() {
                 g('router_cpu_temp').innerText = data.router_cpu_temp || '-';
                 g('router_wifi_temp').innerText = data.router_wifi_temp || '-';
                 
-                const cpuVal = parseFloat(data.router_cpu_temp);
-                const wifiVal = parseFloat(data.router_wifi_temp);
-                const nowSec = Math.floor(Date.now() / 1000);
-                if (!isNaN(cpuVal)) {
-                    tempChartData.push({
-                        time: nowSec,
-                        cpu: cpuVal,
-                        wifi: !isNaN(wifiVal) ? wifiVal : null
-                    });
-                    tempChartData = tempChartData.filter(d => (nowSec - d.time) <= 300);
+                if (data.speed && data.speed.temp_history && data.speed.temp_history.length > 0) {
+                    tempChartData = data.speed.temp_history;
                     drawTempChart();
+                } else {
+                    const cpuVal = parseFloat(data.router_cpu_temp);
+                    const wifiVal = parseFloat(data.router_wifi_temp);
+                    const nowSec = Math.floor(Date.now() / 1000);
+                    if (!isNaN(cpuVal)) {
+                        tempChartData.push({
+                            time: nowSec,
+                            cpu: cpuVal,
+                            wifi: !isNaN(wifiVal) ? wifiVal : null
+                        });
+                        tempChartData = tempChartData.filter(d => (nowSec - d.time) <= 300);
+                        drawTempChart();
+                    }
                 }
                 
                 if (data.speed) {
@@ -3691,8 +3916,28 @@ function fetchModemData() {
                         loadChartData = data.speed.load_history;
                         drawLoadChart();
                     }
+
+                    if (data.speed.cpu_cores && data.speed.cpu_cores.length > 0) {
+                        let summaryParts = [];
+                        data.speed.cpu_cores.forEach((usage, idx) => {
+                            summaryParts.push('Ядро ' + idx + ': ' + usage.toFixed(1) + '%');
+                        });
+                        if (g('cores_util_summary')) {
+                            g('cores_util_summary').innerText = summaryParts.join(' | ');
+                        }
+                    } else if (g('cores_util_summary')) {
+                        g('cores_util_summary').innerText = '-';
+                    }
+
+                    if (data.speed.cores_history) {
+                        coresChartData = data.speed.cores_history;
+                        drawCoresChart();
+                    }
                 } else {
                     g('router_loadavg').innerText = '-';
+                    if (g('cores_util_summary')) {
+                        g('cores_util_summary').innerText = '-';
+                    }
                 }
             }
             isFetching = false;
@@ -3843,7 +4088,7 @@ function setAutoRefresh(){
 }
 
 // Initial draw of chart and trigger initial data load
-window.addEventListener('resize', () => { drawChart(); drawLoadChart(); drawTempChart(); });
+window.addEventListener('resize', () => { drawChart(); drawLoadChart(); drawTempChart(); drawCoresChart(); });
 
 const urlParams = new URLSearchParams(window.location.search);
 const isSimSwitch = urlParams.get('sim_switch') === '1';
@@ -5114,6 +5359,9 @@ local json = require "luci.jsonc"
 local sys = require "luci.sys"
 
 local history_max = 300 -- 5 minutes
+local load_history_max = 300
+local temp_history_max = 300
+local cores_history_max = 300
 local output_file = "/tmp/modem_speed.json"
 
 local function find_active_interface()
@@ -5148,10 +5396,73 @@ local function read_int_file(path)
     return val
 end
 
+local function resolve_file_pattern(pattern)
+    local p = io.popen("ls " .. pattern .. " 2>/dev/null")
+    if p then
+        local line = p:read("*l")
+        p:close()
+        if line and line ~= "" then
+            return line
+        end
+    end
+    return nil
+end
+
+local cpu_temp_file = resolve_file_pattern("/sys/class/thermal/thermal_zone*/temp") or "/sys/class/thermal/thermal_zone0/temp"
+local wifi_temp_file = resolve_file_pattern("/sys/class/ieee80211/phy*/hwmon*/temp1_input")
+
+local function read_temp_file(path)
+    if not path then return nil end
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    local val = tonumber(content)
+    if val then
+        if val > 1000 then val = val / 1000 end
+        return math.floor(val * 10 + 0.5) / 10
+    end
+    return nil
+end
+
+local function read_proc_stat()
+    local f = io.open("/proc/stat", "r")
+    if not f then return {} end
+    local cores = {}
+    for line in f:lines() do
+        local core_idx = line:match("^cpu(%d+)")
+        if core_idx then
+            local idx = tonumber(core_idx)
+            local numbers = {}
+            for num in line:gmatch("%s+(%d+)") do
+                table.insert(numbers, tonumber(num))
+            end
+            if #numbers >= 4 then
+                local user = numbers[1] or 0
+                local nice = numbers[2] or 0
+                local system = numbers[3] or 0
+                local idle = numbers[4] or 0
+                local iowait = numbers[5] or 0
+                local irq = numbers[6] or 0
+                local softirq = numbers[7] or 0
+                local steal = numbers[8] or 0
+
+                local total = user + nice + system + idle + iowait + irq + softirq + steal
+                local active = total - idle - iowait
+                cores[idx + 1] = { core_id = idx, total = total, active = active }
+            end
+        end
+    end
+    f:close()
+    return cores
+end
+
 -- Load existing history to prevent gaps on daemon restarts
 local history = {}
 local load_history = {}
-local load_history_max = 300
+local temp_history = {}
+local cores_history = {}
+
 local f = io.open(output_file, "r")
 if f then
     local content = f:read("*a")
@@ -5160,12 +5471,15 @@ if f then
     if success and type(parsed) == "table" then
         if parsed.history then history = parsed.history end
         if parsed.load_history then load_history = parsed.load_history end
+        if parsed.temp_history then temp_history = parsed.temp_history end
+        if parsed.cores_history then cores_history = parsed.cores_history end
     end
 end
 
 local prev_rx = read_int_file(rx_file)
 local prev_tx = read_int_file(tx_file)
 local prev_time = os.time()
+local prev_cores_stat = read_proc_stat()
 
 while true do
     sys.exec("sleep 1")
@@ -5218,19 +5532,73 @@ while true do
         table.remove(load_history, 1)
     end
 
+    -- Read CPU & WiFi temperatures
+    if not cpu_temp_file then
+        cpu_temp_file = resolve_file_pattern("/sys/class/thermal/thermal_zone*/temp") or "/sys/class/thermal/thermal_zone0/temp"
+    end
+    if not wifi_temp_file then
+        wifi_temp_file = resolve_file_pattern("/sys/class/ieee80211/phy*/hwmon*/temp1_input")
+    end
+    local cpu_temp = read_temp_file(cpu_temp_file)
+    local wifi_temp = read_temp_file(wifi_temp_file)
+
+    if cpu_temp or wifi_temp then
+        local temp_entry = { time = curr_time }
+        if cpu_temp then temp_entry.cpu = cpu_temp end
+        if wifi_temp then temp_entry.wifi = wifi_temp end
+        table.insert(temp_history, temp_entry)
+        if #temp_history > temp_history_max then
+            table.remove(temp_history, 1)
+        end
+    end
+
+    -- Calculate per-core CPU utilization from /proc/stat
+    local curr_cores_stat = read_proc_stat()
+    local cpu_cores = {}
+    for i = 1, #curr_cores_stat do
+        local curr = curr_cores_stat[i]
+        local prev = prev_cores_stat[i]
+        local usage = 0
+        if curr and prev then
+            local delta_total = curr.total - prev.total
+            local delta_active = curr.active - prev.active
+            if delta_total > 0 and delta_active > 0 then
+                usage = (delta_active / delta_total) * 100
+                if usage > 100 then usage = 100 end
+            end
+        end
+        usage = math.floor(usage * 10 + 0.5) / 10
+        table.insert(cpu_cores, usage)
+    end
+    prev_cores_stat = curr_cores_stat
+
+    if #cpu_cores > 0 then
+        table.insert(cores_history, { cores = cpu_cores, time = curr_time })
+        if #cores_history > cores_history_max then
+            table.remove(cores_history, 1)
+        end
+    end
+
     local out_data = {
         interface = interface,
         rx_speed = rx_speed,
         tx_speed = tx_speed,
         history = history,
         loadavg = loadavg_val,
-        load_history = load_history
+        load_history = load_history,
+        cpu_temp = cpu_temp,
+        wifi_temp = wifi_temp,
+        temp_history = temp_history,
+        cpu_cores = cpu_cores,
+        cores_history = cores_history
     }
 
-    local out_f = io.open(output_file, "w")
+    local tmp_file = output_file .. ".tmp"
+    local out_f = io.open(tmp_file, "w")
     if out_f then
         out_f:write(json.stringify(out_data))
         out_f:close()
+        os.rename(tmp_file, output_file)
     end
 
     prev_rx = curr_rx
@@ -5269,6 +5637,7 @@ if [ -f /etc/init.d/pingcheck ]; then
     rm -f /etc/init.d/pingcheck /usr/bin/pingcheck.sh
 fi
 
+echo "v0.1" > /etc/modem_ui_version
 rm -rf /tmp/luci-*
 /etc/init.d/rpcd restart
 echo "Installation Complete!"
