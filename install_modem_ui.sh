@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "Installing Modem UI..."
+echo "Installing Lite Modem UI (Modem Info & Setup Antenna)..."
 
 mkdir -p /usr/lib/lua/luci/controller/
 mkdir -p /usr/lib/lua/luci/view/modem/
@@ -18,10 +18,6 @@ function index()
     entry({"admin", "modem"}, firstchild(), _("Modem"), 60).dependent = false
     entry({"admin", "modem", "modeminfo"}, template("modem/modeminfo"), _("Modem Info"), 10)
     entry({"admin", "modem", "antenna"}, template("modem/antenna"), _("Setup antenna"), 15)
-    entry({"admin", "modem", "sms"}, template("modem/sms"), _("SMS-managment"), 20)
-    entry({"admin", "modem", "esim"}, template("modem/esim"), _("eSIM Managment"), 30)
-    entry({"admin", "modem", "ussd"}, template("modem/ussd"), _("USSD-команды"), 40)
-    entry({"admin", "modem", "pingcheck"}, template("modem/pingcheck"), _("Internet Status"), 50)
 
     -- eSIM API endpoints (adapted from epm)
     entry({"admin", "modem", "esim", "status"}, call("esim_status"), nil).leaf = true
@@ -49,6 +45,9 @@ function index()
     entry({"admin", "modem", "get_dmesg"}, call("get_dmesg"), nil).leaf = true
     entry({"admin", "modem", "get_combined_logs"}, call("get_combined_logs"), nil).leaf = true
     entry({"admin", "modem", "reset_usb_port"}, call("reset_usb_port"), nil).leaf = true
+    entry({"admin", "modem", "reset_modem"}, call("action_reset_modem"), nil).leaf = true
+    entry({"admin", "modem", "update_ui"}, call("action_update_ui"), nil).leaf = true
+    entry({"admin", "modem", "update_recovery"}, call("action_update_recovery"), nil).leaf = true
 
     -- Pingcheck APIs
     entry({"admin", "modem", "pingcheck_data"}, call("get_pingcheck_data"), nil).leaf = true
@@ -487,9 +486,9 @@ function get_modem_data()
         return
     end
 
-    -- 1. Scan QMI devices
+    -- 1. Scan QMI devices (supports both USB cdc-wdm* and PCIe MHI wwan*qmi*)
     local wdm_devs = {}
-    local ls_h = io.popen("ls /dev/cdc-wdm* 2>/dev/null")
+    local ls_h = io.popen("ls /dev/cdc-wdm* /dev/wwan*qmi* 2>/dev/null")
     if ls_h then
         for line in ls_h:lines() do table.insert(wdm_devs, line) end
         ls_h:close()
@@ -508,10 +507,10 @@ function get_modem_data()
 
     -- 2. Find MMCLI index
     local mmcli_idx = "any"
-    local port_match = qmi_dev:match("cdc%-wdm%d+")
+    local port_match = qmi_dev:match("cdc%-wdm%d+") or qmi_dev:match("wwan%d*qmi%d*")
     for id in m_list:gmatch("ModemManager1/Modem/(%d+)") do
         local chk_m = exec("mmcli -m " .. id) or ""
-        local matched_port = chk_m:match("(cdc%-wdm%d+)")
+        local matched_port = chk_m:match("(cdc%-wdm%d+)") or chk_m:match("(wwan%d*qmi%d*)")
         if matched_port then
             if port_match and matched_port == port_match then
                 mmcli_idx = id
@@ -1133,6 +1132,43 @@ function reset_usb_port()
     luci.http.write_json({success = success, dev_dir = dev_dir})
 end
 
+function action_reset_modem()
+    local q_dev = luci.http.formvalue("qmi_dev")
+    if not q_dev or q_dev == "" then
+        local ls_h = io.popen("ls /dev/cdc-wdm* /dev/wwan*qmi* 2>/dev/null")
+        local wdm_devs = {}
+        if ls_h then
+            for line in ls_h:lines() do table.insert(wdm_devs, line) end
+            ls_h:close()
+        end
+        q_dev = wdm_devs[1] or "/dev/cdc-wdm0"
+    end
+    -- Trigger QMI reset in background after a brief delay so HTTP response is sent cleanly
+    os.execute(string.format("(sleep 1 && timeout 5 qmicli -p -d %s --dms-set-operating-mode=reset >/dev/null 2>&1) &", q_dev))
+    luci.http.prepare_content("application/json")
+    luci.http.write_json({ success = true, qmi_dev = q_dev })
+end
+
+function action_update_ui()
+    local cmd = "(curl -k -sSL -o /tmp/install_modem_ui.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_ui.sh' || " ..
+                "wget -q --no-check-certificate -O /tmp/install_modem_ui.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_ui.sh' || " ..
+                "uclient-fetch --no-check-certificate -O /tmp/install_modem_ui.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_ui.sh') && " ..
+                "chmod 777 /tmp/install_modem_ui.sh && /tmp/install_modem_ui.sh > /tmp/update_ui.log 2>&1 &"
+    os.execute(cmd)
+    luci.http.prepare_content("application/json")
+    luci.http.write_json({ success = true })
+end
+
+function action_update_recovery()
+    local cmd = "(curl -k -sSL -o /tmp/install_modem_recovery.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_recovery.sh' || " ..
+                "wget -q --no-check-certificate -O /tmp/install_modem_recovery.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_recovery.sh' || " ..
+                "uclient-fetch --no-check-certificate -O /tmp/install_modem_recovery.sh 'https://github.com/Killmistr/ModemTweaksOW/raw/refs/heads/main/install_modem_recovery.sh') && " ..
+                "chmod 777 /tmp/install_modem_recovery.sh && /tmp/install_modem_recovery.sh > /tmp/update_recovery.log 2>&1 &"
+    os.execute(cmd)
+    luci.http.prepare_content("application/json")
+    luci.http.write_json({ success = true })
+end
+
 function get_combined_logs()
     local sys = require "luci.sys"
     local dmesg_data = sys.exec("dmesg") or ""
@@ -1297,12 +1333,10 @@ function clear_pingcheck_log()
     luci.http.prepare_content("application/json")
     luci.http.write_json({ success = success })
 end
-
 EOF
 
 echo "Deploying /usr/lib/lua/luci/view/modem/modeminfo.htm..."
 cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
-<%+header%>
 <%
     local http = require "luci.http"
 
@@ -1327,7 +1361,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     elseif act == "reset_modem" then
         local q_dev = http.formvalue("qmi_dev")
         if not q_dev or q_dev == "" then
-            local ls_h = io.popen("ls /dev/cdc-wdm* 2>/dev/null")
+            local ls_h = io.popen("ls /dev/cdc-wdm* /dev/wwan*qmi* 2>/dev/null")
             local wdm_devs = {}
             if ls_h then
                 for line in ls_h:lines() do table.insert(wdm_devs, line) end
@@ -1335,11 +1369,13 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
             end
             q_dev = wdm_devs[1] or "/dev/cdc-wdm0"
         end
-        os.execute(string.format("qmicli -p -d %s --dms-set-operating-mode=reset", q_dev))
-        os.execute("sleep 6")
+        os.execute(string.format("(sleep 1 && timeout 5 qmicli -p -d %s --dms-set-operating-mode=reset >/dev/null 2>&1) &", q_dev))
         http.redirect(http.getenv("REQUEST_URI"):gsub("%?.*$", ""))
         return
     end
+%>
+<%+header%>
+<%
 
     local function exec(cmd)
         local safe_cmd = cmd
@@ -1398,7 +1434,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     end
 
     local wdm_devs = {}
-    local ls_h = io.popen("ls /dev/cdc-wdm* 2>/dev/null")
+    local ls_h = io.popen("ls /dev/cdc-wdm* /dev/wwan*qmi* 2>/dev/null")
     if ls_h then
         for line in ls_h:lines() do table.insert(wdm_devs, line) end
         ls_h:close()
@@ -1409,7 +1445,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     local qmi_cmd = "timeout 3 qmicli -d " .. qmi_dev .. " -p "
 
     local mmcli_idx = "any"
-    local port_match = qmi_dev:match("cdc%-wdm%d+")
+    local port_match = qmi_dev:match("cdc%-wdm%d+") or qmi_dev:match("wwan%d*qmi%d*")
     local mm_mappings = {}
     local mm_ids = {}
     local m_list = exec("mmcli -L") or ""
@@ -1419,7 +1455,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
         for id in m_list:gmatch("ModemManager1/Modem/(%d+)") do
             table.insert(mm_ids, id)
             local chk_m = exec("mmcli -m " .. id) or ""
-            local matched_port = chk_m:match("(cdc%-wdm%d+)")
+            local matched_port = chk_m:match("(cdc%-wdm%d+)") or chk_m:match("(wwan%d*qmi%d*)")
             if matched_port then
                 table.insert(mm_mappings, "/dev/" .. matched_port .. " &harr; mmcli " .. id)
                 if port_match and matched_port == port_match then
@@ -2057,11 +2093,11 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     <p style="color: #94a3b8; margin: 0; font-size: 14px; margin-bottom: 20px;">Пожалуйста, подключите модем, проверьте питание и убедитесь, что служба ModemManager активна.</p>
     
     <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
-        <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
         <a href="?action=restart_iface" style="display: inline-block; padding: 8px 16px; background-color: #f59e0b; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск интерфейса MODEM...')">Перезапустить интерфейс MODEM</a>
+        <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
         <a href="?action=restart_rf" style="display: inline-block; padding: 8px 16px; background-color: #10b981; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск радиомодуля (RF)...')">Перезапустить RF</a>
         <a href="javascript:void(0)" onclick="resetUsbPort();" style="display: inline-block; padding: 8px 16px; background-color: #8b5cf6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;">Сбросить USB порт модема</a>
-        <a href="?action=reset_modem&qmi_dev=<%=qmi_dev%>" style="display: inline-block; padding: 8px 16px; background-color: #ef4444; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезагрузка модема (QMI)...')">Перезагрузить модем</a>
+        <a href="javascript:void(0)" onclick="resetModem();" style="display: inline-block; padding: 8px 16px; background-color: #ef4444; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;">Перезагрузить модем</a>
     </div>
     
     <div style="margin-top: 20px; border-top: 1px solid #334155; padding-top: 15px;">
@@ -2602,11 +2638,11 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
     <h4 style="margin: 0 0 15px 0; color: #ffffff;">⚠️ Устранение неполадок и диагностика</h4>
     <p style="color: #94a3b8; font-size: 13px; margin: 0 0 15px 0;">Если соединение с интернетом нестабильно, вы можете принудительно перезапустить службы или выгрузить логи.</p>
     <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-        <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
         <a href="?action=restart_iface" style="display: inline-block; padding: 8px 16px; background-color: #f59e0b; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск интерфейса MODEM...')">Перезапустить интерфейс MODEM</a>
+        <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
         <a href="?action=restart_rf" style="display: inline-block; padding: 8px 16px; background-color: #10b981; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск радиомодуля (RF)...')">Перезапустить RF</a>
         <a href="javascript:void(0)" onclick="resetUsbPort();" style="display: inline-block; padding: 8px 16px; background-color: #8b5cf6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;">Сбросить USB порт модема</a>
-        <a href="?action=reset_modem&qmi_dev=<%=qmi_dev%>" style="display: inline-block; padding: 8px 16px; background-color: #ef4444; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезагрузка модема (QMI)...')">Перезагрузить модем</a>
+        <a href="javascript:void(0)" onclick="resetModem();" style="display: inline-block; padding: 8px 16px; background-color: #ef4444; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;">Перезагрузить модем</a>
     </div>
 </div>
 
@@ -2625,6 +2661,15 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/modeminfo.htm
         </select>
     </div>
     <div id="refresh_timer" style="color: #60a5fa; font-family: monospace; font-size: 13px;"></div>
+</div>
+
+<div class="sim-dash" style="background-color: #1e293b; border-left: 4px solid #10b981; padding: 20px; margin-top: 30px;">
+    <h4 style="margin: 0 0 15px 0; color: #ffffff;">🔄 Обновление компонентов системы</h4>
+    <p style="color: #94a3b8; font-size: 13px; margin: 0 0 15px 0;">Загрузка и установка актуальных версий панели управления модемом и службы автоматического восстановления с GitHub.</p>
+    <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+        <button type="button" id="btn_update_ui" onclick="updateModemUI();" style="display: inline-block; padding: 8px 16px; background-color: #059669; color: #ffffff; border: 1px solid #10b981; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#047857'" onmouseout="this.style.background='#059669'">Обновить панель управления модемом</button>
+        <button type="button" id="btn_update_recovery" onclick="updateModemRecovery();" style="display: inline-block; padding: 8px 16px; background-color: #2563eb; color: #ffffff; border: 1px solid #3b82f6; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; font-family: sans-serif; transition: all 0.2s;" onmouseover="this.style.background='#1d4ed8'" onmouseout="this.style.background='#2563eb'">Обновить службу мониторинга</button>
+    </div>
 </div>
 
 <script>
@@ -3321,7 +3366,8 @@ function fetchModemData() {
     }
     isFetching = true;
     
-    const dev = g('modem_interface_select').value;
+    const devEl = g('modem_interface_select');
+    const dev = devEl ? devEl.value : '<%=qmi_dev%>';
     const url = '<%=luci.dispatcher.build_url("admin/modem/data")%>?qmi_dev=' + encodeURIComponent(dev);
     
     fetch(url)
@@ -3332,12 +3378,14 @@ function fetchModemData() {
                     updateDaemonUI(data.recovery_daemon_running, data.recovery_daemon_enabled);
                 }
                 // Update visibility of wrappers
+                const dataCont = g('modem_data_container');
+                const noModemCont = g('no_modem_banner');
                 if (data.has_modem) {
-                    g('modem_data_container').style.display = 'block';
-                    g('no_modem_banner').style.display = 'none';
+                    if (dataCont) dataCont.style.display = 'block';
+                    if (noModemCont) noModemCont.style.display = 'none';
                 } else {
-                    g('modem_data_container').style.display = 'none';
-                    g('no_modem_banner').style.display = 'block';
+                    if (dataCont) dataCont.style.display = 'none';
+                    if (noModemCont) noModemCont.style.display = 'block';
                 }
 
                 // Update Recovery Metrics (visible in both states)
@@ -3683,6 +3731,93 @@ function resetUsbPort() {
         });
 }
 
+function resetModem() {
+    showRecoveryOverlay(_t('Перезагрузка модема (QMI)...'));
+    
+    let sec = 15;
+    const subtitle = window.g ? window.g('overlay_subtitle') : document.getElementById('overlay_subtitle');
+    if (subtitle) {
+        subtitle.innerText = _t('Перезагрузка и инициализация модема, секунд осталось: ') + sec;
+    }
+    
+    const interval = setInterval(() => {
+        sec--;
+        if (subtitle) {
+            subtitle.innerText = _t('Перезагрузка и инициализация модема, секунд осталось: ') + sec;
+        }
+        if (sec <= 0) {
+            clearInterval(interval);
+            const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+            window.location.href = cleanUrl;
+        }
+    }, 1000);
+
+    const devEl = g('modem_interface_select');
+    const dev = devEl ? devEl.value : '<%=qmi_dev%>';
+    const url = '<%=luci.dispatcher.build_url("admin/modem/reset_modem")%>?qmi_dev=' + encodeURIComponent(dev);
+    fetch(url)
+        .then(res => res.json())
+        .catch(err => {
+            console.error('Modem reset trigger failed:', err);
+        });
+}
+
+function updateModemUI() {
+    showRecoveryOverlay(_t('Обновление панели управления модемом...'));
+    
+    let sec = 20;
+    const subtitle = window.g ? window.g('overlay_subtitle') : document.getElementById('overlay_subtitle');
+    if (subtitle) {
+        subtitle.innerText = _t('Загрузка с GitHub и установка обновления, секунд осталось: ') + sec;
+    }
+    
+    const interval = setInterval(() => {
+        sec--;
+        if (subtitle) {
+            subtitle.innerText = _t('Загрузка с GitHub и установка обновления, секунд осталось: ') + sec;
+        }
+        if (sec <= 0) {
+            clearInterval(interval);
+            window.location.reload();
+        }
+    }, 1000);
+
+    const url = '<%=luci.dispatcher.build_url("admin/modem/update_ui")%>';
+    fetch(url)
+        .then(res => res.json())
+        .catch(err => {
+            console.error('Update UI trigger failed:', err);
+        });
+}
+
+function updateModemRecovery() {
+    showRecoveryOverlay(_t('Обновление службы мониторинга...'));
+    
+    let sec = 12;
+    const subtitle = window.g ? window.g('overlay_subtitle') : document.getElementById('overlay_subtitle');
+    if (subtitle) {
+        subtitle.innerText = _t('Загрузка с GitHub и перезапуск службы, секунд осталось: ') + sec;
+    }
+    
+    const interval = setInterval(() => {
+        sec--;
+        if (subtitle) {
+            subtitle.innerText = _t('Загрузка с GitHub и перезапуск службы, секунд осталось: ') + sec;
+        }
+        if (sec <= 0) {
+            clearInterval(interval);
+            window.location.reload();
+        }
+    }, 1000);
+
+    const url = '<%=luci.dispatcher.build_url("admin/modem/update_recovery")%>';
+    fetch(url)
+        .then(res => res.json())
+        .catch(err => {
+            console.error('Update recovery trigger failed:', err);
+        });
+}
+
 function tick(){
     if(cDown<=0){
         g('refresh_timer').innerText = _t("Обновление...");
@@ -3727,7 +3862,8 @@ if (isSimSwitch) {
         if (secondsLeft <= 0) {
             clearInterval(countdown);
             if (overlay) overlay.style.display = 'none';
-            const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname + "?qmi_dev=" + encodeURIComponent(g('modem_interface_select').value);
+            const devEl = g('modem_interface_select');
+            const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname + "?qmi_dev=" + encodeURIComponent(devEl ? devEl.value : '<%=qmi_dev%>');
             window.location.href = cleanUrl;
         }
     }, 1000);
@@ -3990,7 +4126,18 @@ const dict = {
     "Стоп": "Stop",
     "Отобразить": "Show",
     "Скрыть отображение": "Hide",
-    "Запись...": "Logging..."
+    "Запись...": "Logging...",
+
+    // Component update translations
+    "🔄 Обновление компонентов системы": "🔄 System Components Update",
+    "Загрузка и установка актуальных версий панели управления модемом и службы автоматического восстановления с GitHub.": "Download and install latest versions of Modem UI and recovery service from GitHub.",
+    "Обновить панель управления модемом": "Update Modem Control Panel",
+    "Обновить службу мониторинга": "Update Monitoring Service",
+    "Обновление панели управления модемом...": "Updating Modem Control Panel...",
+    "Обновление службы мониторинга...": "Updating Monitoring Service...",
+    "Загрузка с GitHub и установка обновления, секунд осталось: ": "Downloading from GitHub and installing update, seconds left: ",
+    "Загрузка с GitHub и перезапуск службы, секунд осталось: ": "Downloading from GitHub and restarting service, seconds left: ",
+    "Перезагрузка и инициализация модема, секунд осталось: ": "Modem rebooting and initializing, seconds left: "
 };
 
 function _t(str) {
@@ -4140,7 +4287,7 @@ cat << \EOF > /usr/lib/lua/luci/view/modem/antenna.htm
     local wdm_devs = {}
     local qmi_dev = "-"
     if has_modem then
-        local ls_h = io.popen("ls /dev/cdc-wdm* 2>/dev/null")
+        local ls_h = io.popen("ls /dev/cdc-wdm* /dev/wwan*qmi* 2>/dev/null")
         if ls_h then
             for line in ls_h:lines() do table.insert(wdm_devs, line) end
             ls_h:close()
@@ -4961,1506 +5108,6 @@ setTimeout(() => translatePage(currentLang), 100);
 
 EOF
 
-echo "Deploying /usr/lib/lua/luci/view/modem/sms.htm..."
-cat << \EOF > /usr/lib/lua/luci/view/modem/sms.htm
-<%+header%>
-<%
-    local http = require "luci.http"
-
-    local jsonc = require "luci.jsonc"
-
-    local function exec(cmd)
-        local h = io.popen(cmd .. " 2>/dev/null")
-        if h then
-            local res = h:read("*a")
-            h:close()
-            return res or ""
-        end
-        return ""
-    end
-
-    local ARCHIVE_FILE = "/etc/sms_archive.json"
-
-    local mmcli_idx = http.formvalue("mmcli_idx") or "any"
-
-    local send_error = ""
-
-    -- Обработка отправки SMS
-    if http.formvalue("send_sms") then
-        local num = http.formvalue("sms_number")
-        local txt = http.formvalue("sms_text")
-        if num and txt and num ~= "" and txt ~= "" then
-            -- Проверка статуса модема
-            local m_out = exec("mmcli -m " .. mmcli_idx)
-            local m_state = m_out:match("state:%s*([^\n]+)") or "unknown"
-            
-            if not m_state:match("connected") then
-                send_error = "Модем не подключен к сети (статус: " .. m_state .. "). Отправка SMS невозможна."
-            else
-                -- Очистка от кавычек во избежание инъекций
-                local safe_num = num:gsub("'", ""):gsub('"', "")
-                local safe_txt = txt:gsub("'", "'\\''")
-                
-                -- Шаг 1: Создание SMS
-                local create_cmd = string.format("mmcli -m %s --messaging-create-sms=\"text='%s',number='%s'\"", mmcli_idx, safe_txt, safe_num)
-                local create_out = exec(create_cmd)
-                local new_sms_path = create_out:match("SMS/(%d+)")
-                
-                if new_sms_path then
-                    -- Шаг 2: Отправка SMS синхронно
-                    os.execute(string.format("mmcli -s %s --send >/dev/null 2>&1", new_sms_path))
-                    os.execute("sleep 1") 
-                    -- Запуск синхронизации, чтобы отправленное сообщение попало в архив
-                    os.execute("/usr/bin/sms_sync.lua")
-                end
-                
-                -- Редирект после успешной отправки
-                http.redirect(luci.dispatcher.build_url('admin/modem/sms'))
-                return
-            end
-        end
-    end
-
-    -- Обработка удаления SMS
-    if http.formvalue("delete_sms") then
-        local del_id = http.formvalue("delete_sms")
-        local f = io.open(ARCHIVE_FILE, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            if content and content ~= "" then
-                local archive = jsonc.parse(content) or {}
-                local new_arc = {}
-                for _, s in ipairs(archive) do
-                    if s.id ~= del_id then
-                        table.insert(new_arc, s)
-                    end
-                end
-                local out_f = io.open(ARCHIVE_FILE, "w")
-                if out_f then
-                    out_f:write(jsonc.stringify(new_arc))
-                    out_f:close()
-                end
-            end
-        end
-        http.redirect(luci.dispatcher.build_url('admin/modem/sms'))
-        return
-    end
-
-    -- Обработка добавления в sysupgrade
-    if http.formvalue("add_sysupgrade") then
-        os.execute("grep -q '/etc/sms_archive.json' /etc/sysupgrade.conf 2>/dev/null || echo '/etc/sms_archive.json' >> /etc/sysupgrade.conf")
-        http.redirect(luci.dispatcher.build_url('admin/modem/sms'))
-        return
-    end
-
-    -- Запуск принудительной синхронизации перед загрузкой страницы
-    os.execute("/usr/bin/sms_sync.lua")
-
-    -- Чтение архива для отображения
-    local received_sms = {}
-    local sent_sms = {}
-    local archive = {}
-    
-    local f = io.open(ARCHIVE_FILE, "r")
-    if f then
-        local content = f:read("*a")
-        f:close()
-        if content and content ~= "" then
-            archive = jsonc.parse(content) or {}
-        end
-    end
-
-    for _, sms_obj in ipairs(archive) do
-        if sms_obj.state == "received" then
-            table.insert(received_sms, sms_obj)
-        elseif sms_obj.state == "sent" then
-            table.insert(sent_sms, sms_obj)
-        end
-    end
-
-    -- Сортировка: новые сверху (по saved_at или timestamp)
-    local function sort_sms(a, b) 
-        return (tonumber(a.saved_at) or 0) > (tonumber(b.saved_at) or 0) 
-    end
-    table.sort(received_sms, sort_sms)
-    table.sort(sent_sms, sort_sms)
-
-    -- Проверка наличия архива в sysupgrade.conf
-    local sysconf_check = exec("grep '/etc/sms_archive.json' /etc/sysupgrade.conf 2>/dev/null")
-    local is_in_sysupgrade = (sysconf_check:match("sms_archive.json") ~= nil)
-%>
-
-<div class="cbi-section">
-    <div class="cbi-section-node" style="padding: 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <h3 style="margin-bottom: 5px; color: #ffffff;">Панель SMS (ModemManager)</h3>
-        </div>
-        <div style="display: flex; align-items: center; gap: 6px; background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); height: fit-content; margin-right: 15px;">
-            <span style="font-size: 12px; color: #94a3b8;">🌐 Language:</span>
-            <select id="lang_select" onchange="changeLanguage(this.value)" style="background: transparent; color: #f8fafc; border: none; font-size: 12px; cursor: pointer; outline: none; padding: 0 4px; font-weight: 500;">
-                <option value="ru" style="background: #1e293b; color: #f8fafc;">RU</option>
-                <option value="en" style="background: #1e293b; color: #f8fafc;">EN</option>
-            </select>
-        </div>
-    </div>
-    <div style="background-color: #7f1d1d; border-left: 4px solid #ef4444; color: #fca5a5; padding: 10px 15px; margin-top: 10px; margin-bottom: 15px; border-radius: 4px; font-size: 13px;">
-        <strong>⚠️ Внимание:</strong> Если при обновлении прошивки роутера (sysupgrade) вы <strong>снимете</strong> галочку "Сохранять настройки", <strong>все архивированные здесь SMS будут безвозвратно удалены!</strong>
-            <% if not is_in_sysupgrade then %>
-            <br>Для надежности убедитесь, что путь <code>/etc/sms_archive.json</code> добавлен в список файлов для сохранения (<code>/etc/sysupgrade.conf</code>).
-            <form method="post" action="<%=luci.dispatcher.build_url('admin/modem/sms')%>" style="margin-top: 10px;">
-                <button type="submit" name="add_sysupgrade" value="1" class="cbi-button cbi-button-apply" style="padding: 6px 12px; font-weight: bold;">Добавить автоматически</button>
-            </form>
-            <% end %>
-        </div>
-    </div>
-</div>
-
-<style>
-.sms-dash { background-color:#1e293b; color:#d1d5db; padding:20px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;}
-.sms-dash h4 { color:#fff; border-bottom:1px solid #334155; padding-bottom:8px; margin-top:0; font-weight:normal; }
-.sms-card { background-color:#0f172a; border:1px solid #334155; border-radius:6px; padding:12px; margin-bottom:12px; }
-.sms-header { display:flex; justify-content:space-between; margin-bottom:10px; font-size:13px; color:#94a3b8; border-bottom:1px dashed #334155; padding-bottom:5px; }
-.sms-body { color:#f8fafc; font-size:14px; white-space:pre-wrap; line-height:1.5; }
-.sms-input { width:100%; max-width:400px; background:#0f172a; color:#fff; border:1px solid #3b82f6; padding:8px 12px; border-radius:4px; margin-bottom:15px; box-sizing:border-box; outline:none; }
-.sms-input:focus { border-color:#60a5fa; }
-.sms-textarea { width:100%; height:100px; background:#0f172a; color:#fff; border:1px solid #3b82f6; padding:10px 12px; border-radius:4px; resize:vertical; box-sizing:border-box; font-family:inherit; outline:none; }
-.sms-textarea:focus { border-color:#60a5fa; }
-.btn-del { background:none; border:none; color:#ef4444; cursor:pointer; font-size:13px; font-weight:bold; }
-.btn-del:hover { color:#f87171; text-decoration:underline; }
-.char-counter { font-size:13px; color:#94a3b8; margin-top:5px; margin-bottom:15px; }
-</style>
-
-<!-- Форма отправки SMS -->
-<div class="sms-dash">
-    <h4>Написать SMS</h4>
-    
-    <% if send_error ~= "" then %>
-        <div style="background-color: #7f1d1d; border-left: 4px solid #ef4444; color: #fca5a5; padding: 10px 15px; margin-bottom: 15px; border-radius: 4px;">
-            <strong>Ошибка:</strong> <%=send_error%>
-        </div>
-    <% end %>
-
-    <form id="sms-send-form" method="post" action="<%=luci.dispatcher.build_url('admin/modem/sms')%>" onsubmit="return validateSMSForm(event)">
-        <label style="color:#e2e8f0; display:block; margin-bottom:5px; font-weight:bold;">Номер телефона:</label>
-        <input type="text" name="sms_number" class="sms-input" placeholder="+7..." required>
-        
-        <label style="color:#e2e8f0; display:block; margin-bottom:5px; font-weight:bold;">Сообщение:</label>
-        <textarea name="sms_text" id="sms_text" class="sms-textarea" placeholder="Введите текст сообщения..." oninput="updateCounter()" required></textarea>
-        
-        <div class="char-counter" id="char_counter">
-            Длина: 0 | SMS: 0 (макс 160 симв. латиница / 70 симв. кириллица)
-        </div>
-        
-        <button type="submit" name="send_sms" value="1" class="cbi-button cbi-button-apply" style="padding:10px 20px; font-weight:bold;">Отправить SMS</button>
-    </form>
-</div>
-
-<!-- Полученные SMS -->
-<div class="sms-dash">
-    <h4>Полученные сообщения <span style="background:#3b82f6; color:#fff; border-radius:10px; padding:2px 8px; font-size:12px; margin-left:10px;"><%=#received_sms%></span></h4>
-    <% if #received_sms == 0 then %>
-        <div style="color:#94a3b8; font-style:italic;">Нет полученных сообщений.</div>
-    <% else %>
-        <% for _, s in ipairs(received_sms) do %>
-            <div class="sms-card">
-                <div class="sms-header">
-                    <span>От: <strong style="color:#60a5fa;"><%=s.number%></strong></span>
-                    <span><%=s.timestamp%></span>
-                </div>
-                <div class="sms-body"><%=s.text%></div>
-                <div style="text-align:right; margin-top:10px;">
-                    <form method="post" action="<%=luci.dispatcher.build_url('admin/modem/sms')%>" style="display:inline;" onsubmit="return confirm('Удалить это сообщение?');">
-                        <input type="hidden" name="delete_sms" value="<%=s.id%>">
-                        <button type="submit" class="btn-del">Удалить</button>
-                    </form>
-                </div>
-            </div>
-        <% end %>
-    <% end %>
-</div>
-
-<!-- Отправленные SMS -->
-<div class="sms-dash">
-    <h4>Отправленные сообщения <span style="background:#10b981; color:#fff; border-radius:10px; padding:2px 8px; font-size:12px; margin-left:10px;"><%=#sent_sms%></span></h4>
-    <% if #sent_sms == 0 then %>
-        <div style="color:#94a3b8; font-style:italic;">Нет отправленных сообщений.</div>
-    <% else %>
-        <% for _, s in ipairs(sent_sms) do %>
-            <div class="sms-card">
-                <div class="sms-header">
-                    <span>Кому: <strong style="color:#34d399;"><%=s.number%></strong></span>
-                    <span><%=s.timestamp%></span>
-                </div>
-                <div class="sms-body"><%=s.text%></div>
-                <div style="text-align:right; margin-top:10px;">
-                    <form method="post" action="<%=luci.dispatcher.build_url('admin/modem/sms')%>" style="display:inline;" onsubmit="return confirm(_t('Удалить это сообщение?'));">
-                        <input type="hidden" name="delete_sms" value="<%=s.id%>">
-                        <button type="submit" class="btn-del">${_t('Удалить')}</button>
-                    </form>
-                </div>
-            </div>
-        <% end %>
-    <% end %>
-</div>
-
-<script>
-function updateCounter() {
-    let txt = document.getElementById('sms_text').value;
-    
-    // Проверка на наличие кириллицы (UCS-2)
-    let isCyrillic = /[А-Яа-яЁё]/.test(txt);
-    
-    // GSM-7 bit = 160 символов, UCS-2 = 70 символов
-    let maxLen = isCyrillic ? 70 : 160;
-    
-    // Подсчет количества SMS-частей
-    // (на самом деле при склейке длинных SMS лимиты 153 для GSM и 67 для UCS-2, но для простоты оставим базовые)
-    let smsCount = 0;
-    if (txt.length > 0) {
-        if (txt.length <= maxLen) {
-            smsCount = 1;
-        } else {
-            let partLen = isCyrillic ? 67 : 153;
-            smsCount = Math.ceil(txt.length / partLen);
-        }
-    }
-    
-    let info = isCyrillic 
-        ? '<span style="color:#fbbf24;">' + _t('(Кириллица, лимит 1 части: 70 симв.)') + '</span>' 
-        : '<span style="color:#4ade80;">' + _t('(Латиница, лимит 1 части: 160 симв.)') + '</span>';
-        
-    if (txt.length === 0) info = "";
-    
-    document.getElementById('char_counter').innerHTML = 
-        _t("Длина:") + " <strong>" + txt.length + "</strong> | " + _t("Количество частей SMS:") + " <strong>" + smsCount + "</strong> " + info;
-}
-
-function validateSMSForm(event) {
-    event.preventDefault();
-    const form = event.target;
-    const btn = form.querySelector('button[type="submit"]');
-    const oldText = btn.innerText;
-    btn.innerHTML = '<span style="border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; width: 12px; height: 12px; border-radius: 50%; display: inline-block; vertical-align: middle; margin-right: 5px; animation: spin 1s infinite;"></span> ' + _t('Проверка модема...');
-    btn.disabled = true;
-
-    fetch('<%=luci.dispatcher.build_url("admin/modem/data")%>')
-        .then(res => res.json())
-        .then(data => {
-            if (data && data.success) {
-                form.submit();
-            } else {
-                alert(_t("Ошибка: модемный интерфейс не обнаружен! Отправка SMS невозможна."));
-                btn.innerText = oldText;
-                btn.disabled = false;
-            }
-        })
-        .catch(err => {
-            alert(_t("Ошибка при проверке интерфейса модема:") + " " + err);
-            btn.innerText = oldText;
-            btn.disabled = false;
-        });
-
-    return false;
-}
-
-// Language Translation Logic
-const dict = {
-    "Панель SMS (ModemManager)": "SMS Dashboard (ModemManager)",
-    "⚠️ Внимание:": "⚠️ Warning:",
-    "Если при обновлении прошивки роутера (sysupgrade) вы <strong>снимете</strong> галочку \"Сохранять настройки\", <strong>все архивированные здесь SMS будут безвозвратно удалены!</strong>": "If you <strong>uncheck</strong> the \"Keep settings\" checkbox during router firmware update (sysupgrade), <strong>all archived SMS here will be permanently deleted!</strong>",
-    "Для надежности убедитесь, что путь <code>/etc/sms_archive.json</code> добавлен в список файлов для сохранения (<code>/etc/sysupgrade.conf</code>).": "For reliability, make sure that the path <code>/etc/sms_archive.json</code> is added to the list of files to save (<code>/etc/sysupgrade.conf</code>).",
-    "Добавить автоматически": "Add automatically",
-    "Написать SMS": "Write SMS",
-    "Номер телефона:": "Phone number:",
-    "Сообщение:": "Message:",
-    "Длина: 0 | SMS: 0 (макс 160 симв. латиница / 70 симв. кириллица)": "Length: 0 | SMS: 0 (max 160 chars latin / 70 chars cyrillic)",
-    "Отправить SMS": "Send SMS",
-    "Полученные сообщения": "Received messages",
-    "Нет полученных сообщений.": "No received messages.",
-    "От:": "From:",
-    "Удалить": "Delete",
-    "Отправленные сообщения": "Sent messages",
-    "Нет отправленных сообщений.": "No sent messages.",
-    "Кому:": "To:",
-    "Удалить это сообщение?": "Delete this message?",
-    "Длина:": "Length:",
-    "Количество частей SMS:": "SMS parts count:",
-    "(Кириллица, лимит 1 части: 70 симв.)": "(Cyrillic, limit of 1 part: 70 chars)",
-    "(Латиница, лимит 1 части: 160 симв.)": "(Latin, limit of 1 part: 160 chars)",
-    "Проверка модема...": "Checking modem...",
-    "Ошибка: модемный интерфейс не обнаружен! Отправка SMS невозможна.": "Error: modem interface not found! Unable to send SMS.",
-    "Ошибка при проверке интерфейса модема:": "Error verifying modem interface:",
-    "Ошибка:": "Error:"
-};
-
-function _t(str) {
-    if (!str) return str;
-    const lang = localStorage.getItem('modem_lang') || 'ru';
-    if (lang === 'ru') return str;
-    return dict[str] || str;
-}
-
-function changeLanguage(lang) {
-    localStorage.setItem('modem_lang', lang);
-    document.cookie = "modem_lang=" + lang + "; path=/; max-age=31536000";
-    const selects = document.querySelectorAll('#lang_select');
-    selects.forEach(s => s.value = lang);
-    translatePage(lang);
-}
-
-function translatePage(lang) {
-    const elements = document.querySelectorAll('h3, h4, h5, p, label, button, span, strong, option, th, td, a, div, input, select');
-    const sortedKeys = Object.keys(dict).sort((a, b) => b.length - a.length);
-    elements.forEach(el => {
-        // Translate text nodes
-        let hasTextChild = false;
-        for (let node of el.childNodes) {
-            if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0) {
-                hasTextChild = true;
-                break;
-            }
-        }
-        if (hasTextChild) {
-            if (!el.hasAttribute('data-ru')) {
-                el.setAttribute('data-ru', el.innerHTML);
-            }
-            const origRu = el.getAttribute('data-ru');
-            if (lang === 'en') {
-                let translated = origRu;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.innerHTML = translated;
-            } else {
-                el.innerHTML = origRu;
-            }
-        }
-
-        // Translate placeholders
-        if (el.placeholder) {
-            if (!el.hasAttribute('data-placeholder-ru')) {
-                el.setAttribute('data-placeholder-ru', el.placeholder);
-            }
-            const origPl = el.getAttribute('data-placeholder-ru');
-            if (lang === 'en') {
-                let translated = origPl;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.placeholder = translated;
-            } else {
-                el.placeholder = origPl;
-            }
-        }
-
-        // Translate titles
-        if (el.title) {
-            if (!el.hasAttribute('data-title-ru')) {
-                el.setAttribute('data-title-ru', el.title);
-            }
-            const origTitle = el.getAttribute('data-title-ru');
-            if (lang === 'en') {
-                let translated = origTitle;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.title = translated;
-            } else {
-                el.title = origTitle;
-            }
-        }
-    });
-}
-
-// Initial language setup
-const currentLang = localStorage.getItem('modem_lang') || 'ru';
-document.cookie = "modem_lang=" + currentLang + "; path=/; max-age=31536000";
-const select = document.getElementById('lang_select');
-if (select) select.value = currentLang;
-setTimeout(() => translatePage(currentLang), 100);
-</script>
-
-<%+footer%>
-
-EOF
-
-echo "Deploying /usr/lib/lua/luci/view/modem/esim.htm..."
-cat << \EOF > /usr/lib/lua/luci/view/modem/esim.htm
-<%+header%>
-<%
-    local http = require "luci.http"
-
-    local act = http.formvalue("action")
-    if act == "restart_mm" then
-        os.execute("/etc/init.d/modemmanager restart")
-        os.execute("sleep 6")
-        http.redirect(http.getenv("REQUEST_URI"):gsub("%?.*$", ""))
-        return
-    elseif act == "restart_iface" then
-        os.execute("ifdown MODEM && sleep 3 && ifup MODEM")
-        os.execute("sleep 6")
-        http.redirect(http.getenv("REQUEST_URI"):gsub("%?.*$", ""))
-        return
-    end
-
-    local function exec(cmd)
-        local h = io.popen(cmd .. " 2>/dev/null")
-        if h then
-            local res = h:read("*a")
-            h:close()
-            return res or ""
-        end
-        return ""
-    end
-    
-    local m_list = exec("mmcli -L") or ""
-    local has_modem = (m_list:match("ModemManager1/Modem/(%d+)") ~= nil)
-%>
-
-<div class="cbi-section">
-    <div class="cbi-section-node" style="padding: 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <h3 style="margin-bottom: 5px; color: #ffffff;">Управление eSIM (LPAC)</h3>
-        </div>
-        <div style="display: flex; align-items: center; gap: 6px; background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); height: fit-content; margin-right: 15px;">
-            <span style="font-size: 12px; color: #94a3b8;">🌐 Language:</span>
-            <select id="lang_select" onchange="changeLanguage(this.value)" style="background: transparent; color: #f8fafc; border: none; font-size: 12px; cursor: pointer; outline: none; padding: 0 4px; font-weight: 500;">
-                <option value="ru" style="background: #1e293b; color: #f8fafc;">RU</option>
-                <option value="en" style="background: #1e293b; color: #f8fafc;">EN</option>
-            </select>
-        </div>
-    </div>
-</div>
-
-<% if not has_modem then %>
-    <div style="background: #1e293b; border-left: 4px solid #ef4444; border-radius: 8px; padding: 24px; text-align: center; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
-        <h3 style="color: #ef4444; margin-top: 0; font-size: 20px;">⚠️ Модемный интерфейс не обнаружен</h3>
-        <p style="color: #94a3b8; margin: 0; font-size: 14px; margin-bottom: 20px;">Пожалуйста, подключите модем, проверьте питание и убедитесь, что служба ModemManager активна.</p>
-        
-        <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
-            <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
-            <a href="?action=restart_iface" style="display: inline-block; padding: 8px 16px; background-color: #f59e0b; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск интерфейса MODEM...')">Перезапустить интерфейс MODEM</a>
-        </div>
-    </div>
-
-    <div id="apply_overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.95); z-index:99999; justify-content:center; align-items:center; flex-direction:column; color:#fff; font-family:sans-serif; backdrop-filter:blur(5px);">
-        <div class="spinning" style="width:60px; height:60px; border:4px solid #334155; border-top-color:#3b82f6; border-radius:50%; animation:spin 1s linear infinite; margin-bottom:20px;"></div>
-        <div id="overlay_title" style="font-size:20px; font-weight:bold; color:#f8fafc;">Применение настроек...</div>
-        <div id="overlay_subtitle" style="font-size:14px; color:#94a3b8; margin-top:8px; text-align:center; max-width:400px; padding:0 20px; line-height:1.5;">Пожалуйста, подождите, выполняется операция перезапуска...</div>
-    </div>
-    <style>
-    @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-    <script>
-    function showRecoveryOverlay(title) {
-        document.getElementById('overlay_title').innerText = title;
-        document.getElementById('overlay_subtitle').innerText = "Пожалуйста, подождите, выполняется перезапуск (около 6 сек)...";
-        document.getElementById('apply_overlay').style.display = 'flex';
-    }
-    </script>
-<% else %>
-
-<style>
-.esim-dash { background-color:#1e293b; color:#d1d5db; padding:20px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;}
-.esim-dash h4 { color:#fff; border-bottom:1px solid #334155; padding-bottom:8px; margin-top:0; font-weight:normal; }
-.profile-card { background-color:#0f172a; border:1px solid #334155; border-radius:6px; padding:15px; margin-bottom:12px; display: flex; justify-content: space-between; align-items: center; }
-.profile-active { border-color: #4ade80; }
-.profile-info { flex-grow: 1; }
-.profile-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.btn-action { background:#3b82f6; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-weight:bold; font-size:13px; }
-.btn-action:hover { background:#2563eb; }
-.btn-danger { background:#ef4444; }
-.btn-danger:hover { background:#dc2626; }
-.btn-success { background:#10b981; }
-.btn-success:hover { background:#059669; }
-.input-text { background:#0f172a; color:#fff; border:1px solid #3b82f6; padding:8px 12px; border-radius:4px; margin-bottom:10px; width:100%; box-sizing:border-box; outline:none; }
-.spinner { border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; width: 16px; height: 16px; animation: spin 1s ease-in-out infinite; display: inline-block; vertical-align: middle; margin-right: 5px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.toast { position: fixed; bottom: 20px; right: 20px; background: #334155; color: #fff; padding: 15px 20px; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); z-index: 1000; display: none; }
-</style>
-
-<div id="toast" class="toast"></div>
-
-<!-- Информация о чипе -->
-<div class="esim-dash">
-    <h4>Информация об eSIM</h4>
-    <div id="esim-status-container">
-        <div class="spinner"></div> Загрузка информации о чипе...
-    </div>
-</div>
-
-<!-- Список профилей -->
-<div class="esim-dash">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-        <h4 style="margin-bottom: 0; border: none; padding: 0;">Установленные профили</h4>
-        <button class="btn-action" onclick="loadProfiles()">Обновить список</button>
-    </div>
-    <div id="profiles-container">
-        <div class="spinner"></div> Загрузка профилей...
-    </div>
-</div>
-
-<!-- Настройка APN сотовой сети -->
-<div class="esim-dash">
-    <h4>Настройка APN сотовой сети</h4>
-    <div style="display: flex; gap: 10px; align-items: center; max-width: 500px; margin-bottom: 10px;">
-        <input type="text" id="cell-apn" class="input-text" style="margin-bottom: 0;" placeholder="Например: plus, globaldata, internet.proximus.be">
-        <button class="btn-action btn-success" onclick="saveAPN()">Сохранить APN</button>
-    </div>
-    <div id="apn-status" style="font-size: 13px; color: #94a3b8;">
-        Загрузка APN...
-    </div>
-</div>
-
-<!-- Загрузка профиля -->
-<div class="esim-dash">
-    <h4>Добавить новый профиль</h4>
-    
-    <div style="margin-bottom: 15px;">
-        <label style="color:#e2e8f0; display:block; margin-bottom:5px; font-weight:bold;">Вариант 1: Загрузить QR-код (Картинка)</label>
-        <input type="file" id="qr-file" accept="image/*" class="input-text" style="background: transparent; border: 1px dashed #3b82f6; cursor: pointer;" onchange="decodeQR(this)">
-        <small style="color: #9ca3af;">Изображение обрабатывается локально в вашем браузере.</small>
-    </div>
-    
-    <div style="border-top: 1px solid #334155; margin: 20px 0;"></div>
-    
-    <div style="margin-bottom: 15px;">
-        <label style="color:#e2e8f0; display:block; margin-bottom:5px; font-weight:bold;">Вариант 2: Ручной ввод</label>
-        <input type="text" id="smdp-server" class="input-text" placeholder="SM-DP+ Server (например: lpa.example.com)">
-        <input type="text" id="activation-code" class="input-text" placeholder="Activation Code">
-        <input type="text" id="confirmation-code" class="input-text" placeholder="Confirmation Code (если требуется)">
-    </div>
-    
-    <!-- Скрытое поле для распарсенного QR-кода -->
-    <input type="hidden" id="qr-result">
-    
-    <button id="btn-download" class="btn-action btn-success" style="padding:10px 20px;" onclick="downloadProfile()">Загрузить профиль на eSIM</button>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-<script>
-const API_BASE = "<%=luci.dispatcher.build_url('admin/modem/esim')%>";
-
-function showToast(msg, isError = false) {
-    const toast = document.getElementById('toast');
-    toast.innerText = msg;
-    toast.style.background = isError ? '#ef4444' : '#10b981';
-    toast.style.display = 'block';
-    setTimeout(() => { toast.style.display = 'none'; }, 5000);
-}
-
-function req(endpoint, data, cb) {
-    let xhr = new XMLHttpRequest();
-    xhr.open("POST", API_BASE + "/" + endpoint, true);
-    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-    xhr.onreadystatechange = function() {
-        if (xhr.readyState === 4) {
-            try {
-                let res = JSON.parse(xhr.responseText);
-                cb(res);
-            } catch(e) {
-                cb({success: false, error: "Invalid JSON response"});
-            }
-        }
-    };
-    let params = [];
-    if(data) {
-        for (let k in data) { params.push(encodeURIComponent(k) + "=" + encodeURIComponent(data[k])); }
-    }
-    xhr.send(params.join("&"));
-}
-
-function loadStatus() {
-    document.getElementById('esim-status-container').innerHTML = '<div class="spinner"></div> ' + _t('Загрузка...');
-    req("status", null, function(res) {
-        if(res.success) {
-            document.getElementById('esim-status-container').innerHTML = `
-                <div style="margin-bottom: 5px;"><strong>EID:</strong> <span style="color:#60a5fa; font-family:monospace;">${res.eid}</span></div>
-                <div style="margin-bottom: 5px;"><strong>${_t('Свободная память:')}</strong> ${res.info && res.info.extCardResource ? res.info.extCardResource.freeNonVolatileMemory + ' bytes' : _t('Неизвестно')}</div>
-            `;
-        } else {
-            document.getElementById('esim-status-container').innerHTML = `<div style="color:#ef4444;">${_t('Ошибка:')} ${res.error}</div>`;
-        }
-    });
-}
-
-function loadProfiles() {
-    document.getElementById('profiles-container').innerHTML = '<div class="spinner"></div> ' + _t('Загрузка...');
-    req("profiles", null, function(res) {
-        if(res.success) {
-            if(!res.profiles || res.profiles.length === 0) {
-                document.getElementById('profiles-container').innerHTML = '<div style="color:#9ca3af;">' + _t('Нет установленных профилей.') + '</div>';
-                return;
-            }
-            let html = '';
-            res.profiles.forEach(p => {
-                let isActive = p.profileState === 1;
-                html += `
-                <div class="profile-card ${isActive ? 'profile-active' : ''}">
-                    <div class="profile-info">
-                        <div style="font-size: 16px; font-weight: bold; color: ${isActive ? '#4ade80' : '#fff'}; margin-bottom: 4px;">
-                            ${p.profileNickname ? p.profileNickname : (p.serviceProviderName || 'Unknown Provider')}
-                        </div>
-                        <div style="font-size: 13px; color: #94a3b8; font-family: monospace; margin-bottom: 4px;">ICCID: ${p.iccid}</div>
-                        <div style="font-size: 13px; color: #94a3b8;">${_t('Провайдер:')} ${p.serviceProviderName || '-'}</div>
-                        <div style="font-size: 13px; color: #94a3b8;">${_t('Состояние:')} ${isActive ? _t('Активен') : _t('Отключен')}</div>
-                    </div>
-                    <div class="profile-actions">
-                        <button class="btn-action ${isActive ? 'btn-danger' : 'btn-success'}" onclick="toggleProfile('${p.iccid}', '${isActive ? 'disable' : 'enable'}', this)">
-                            ${isActive ? _t('Отключить') : _t('Включить')}
-                        </button>
-                        <button class="btn-action" onclick="renameProfile('${p.iccid}', '${p.profileNickname || ''}', this)">${_t('Переименовать')}</button>
-                        <button class="btn-action btn-danger" onclick="deleteProfile('${p.iccid}', this)" ${isActive ? 'disabled style="opacity:0.5; cursor:not-allowed;" title="' + _t('Отключите профиль перед удалением') + '"' : ''}>${_t('Удалить')}</button>
-                    </div>
-                </div>`;
-            });
-            document.getElementById('profiles-container').innerHTML = html;
-        } else {
-            document.getElementById('profiles-container').innerHTML = `<div style="color:#ef4444;">${_t('Ошибка:')} ${res.error}</div>`;
-        }
-    });
-}
-
-function toggleProfile(iccid, action, btn) {
-    if(!confirm(_t(`Вы уверены, что хотите ${action === 'enable' ? 'включить' : 'отключить'} этот профиль? Модем может перезагрузиться.`))) return;
-    let oldTxt = btn.innerText;
-    btn.innerHTML = '<div class="spinner"></div> ' + _t('Пожалуйста, ждите...');
-    btn.disabled = true;
-    req("toggle", {iccid: iccid, action: action}, function(res) {
-        if(res.success) {
-            showToast(_t(res.message));
-            setTimeout(loadProfiles, 2000); // refresh list
-        } else {
-            showToast(_t("Ошибка:") + " " + res.error, true);
-            btn.innerText = oldTxt;
-            btn.disabled = false;
-        }
-    });
-}
-
-function deleteProfile(iccid, btn) {
-    if(!confirm(_t('ВНИМАНИЕ! Удаление профиля необратимо. Вы уверены?'))) return;
-    let oldTxt = btn.innerText;
-    btn.innerHTML = '<div class="spinner"></div> ...';
-    btn.disabled = true;
-    req("delete", {iccid: iccid}, function(res) {
-        if(res.success) {
-            showToast(_t("Профиль успешно удален"));
-            loadProfiles();
-        } else {
-            showToast(_t("Ошибка удаления:") + " " + res.error, true);
-            btn.innerText = oldTxt;
-            btn.disabled = false;
-        }
-    });
-}
-
-function renameProfile(iccid, currName, btn) {
-    let newName = prompt(_t("Введите новое имя профиля:"), currName);
-    if(newName === null || newName === currName) return;
-    let oldTxt = btn.innerText;
-    btn.innerHTML = '<div class="spinner"></div> ...';
-    btn.disabled = true;
-    req("nickname", {iccid: iccid, nickname: newName}, function(res) {
-        if(res.success) {
-            showToast(_t("Имя профиля изменено"));
-            loadProfiles();
-        } else {
-            showToast(_t("Ошибка переименования:") + " " + res.error, true);
-            btn.innerText = oldTxt;
-            btn.disabled = false;
-        }
-    });
-}
-
-function decodeQR(input) {
-    if (input.files && input.files[0]) {
-        var reader = new FileReader();
-        reader.onload = function(e) {
-            var img = new Image();
-            img.onload = function() {
-                var canvas = document.createElement('canvas');
-                var ctx = canvas.getContext('2d');
-                canvas.width = img.width;
-                canvas.height = img.height;
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                if(typeof jsQR !== "undefined") {
-                    var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-                    if (code) {
-                        document.getElementById('qr-result').value = code.data;
-                        showToast(_t("QR-код успешно распознан!"));
-                        // Очистим ручные поля
-                        document.getElementById('smdp-server').value = "";
-                        document.getElementById('activation-code').value = "";
-                    } else {
-                        showToast(_t("Не удалось найти или прочитать QR-код на изображении"), true);
-                        document.getElementById('qr-result').value = "";
-                    }
-                } else {
-                    showToast(_t("Библиотека декодирования QR еще не загружена. Проверьте интернет соединение."), true);
-                }
-            }
-            img.src = e.target.result;
-        }
-        reader.readAsDataURL(input.files[0]);
-    }
-}
-
-function downloadProfile() {
-    let qr = document.getElementById('qr-result').value;
-    let smdp = document.getElementById('smdp-server').value;
-    let actCode = document.getElementById('activation-code').value;
-    let confCode = document.getElementById('confirmation-code').value;
-    
-    if(!qr && !(smdp && actCode)) {
-        showToast(_t("Пожалуйста, загрузите QR-код или заполните SM-DP+ и код активации"), true);
-        return;
-    }
-    
-    let btn = document.getElementById('btn-download');
-    let oldTxt = btn.innerText;
-    btn.innerHTML = '<div class="spinner"></div> ' + _t('Загрузка профиля (может занять до 2-х минут)...');
-    btn.disabled = true;
-    
-    req("download", {qr_code: qr, smdp_server: smdp, activation_code: actCode, confirmation_code: confCode}, function(res) {
-        btn.innerText = oldTxt;
-        btn.disabled = false;
-        
-        if(res.success || (res.payload && res.payload.code === 0)) {
-            showToast(_t("Профиль успешно загружен!"));
-            // Очистка формы
-            document.getElementById('qr-result').value = "";
-            document.getElementById('qr-file').value = "";
-            document.getElementById('smdp-server').value = "";
-            document.getElementById('activation-code').value = "";
-            loadProfiles();
-        } else {
-            showToast(_t("Ошибка загрузки:") + " " + (res.error || (res.payload ? res.payload.message : _t("Неизвестная ошибка"))), true);
-        }
-    });
-}
-
-function loadAPN() {
-    document.getElementById('apn-status').innerHTML = '<div class="spinner"></div> ' + _t('Загрузка APN...');
-    req("apn", null, function(res) {
-        if(res.success) {
-            document.getElementById('cell-apn').value = res.apn || '';
-            document.getElementById('apn-status').innerHTML = _t('Текущий APN интерфейса') + ` <strong>${res.interface}</strong>: <span style="color:#60a5fa; font-weight:bold;">${res.apn || _t('(не задан)')}</span>`;
-        } else {
-            document.getElementById('apn-status').innerHTML = `<span style="color:#ef4444;">${_t('Не удалось загрузить APN:')} ${res.error}</span>`;
-        }
-    });
-}
-
-function saveAPN() {
-    let apnVal = document.getElementById('cell-apn').value;
-    req("apn", {apn: apnVal}, function(res) {
-        if(res.success) {
-            showToast(_t("APN успешно сохранен!"));
-            loadAPN();
-        } else {
-            showToast(_t("Ошибка сохранения APN:") + " " + res.error, true);
-        }
-    });
-}
-
-// Language Translation Logic
-const dict = {
-    "Управление eSIM (LPAC)": "eSIM Management (LPAC)",
-    "Информация об eSIM": "eSIM Info",
-    "Загрузка информации о чипе...": "Loading chip info...",
-    "Установленные профили": "Installed Profiles",
-    "Обновить список": "Refresh List",
-    "Загрузка профилей...": "Loading profiles...",
-    "Настройка APN сотовой сети": "Cell APN Settings",
-    "Сохранить APN": "Save APN",
-    "Загрузка APN...": "Loading APN...",
-    "Добавить новый профиль": "Add New Profile",
-    "Вариант 1: Загрузить QR-код (Картинка)": "Option 1: Upload QR code (Image)",
-    "Изображение обрабатывается локально в вашем браузере.": "Image is processed locally in your browser.",
-    "Вариант 2: Ручной ввод": "Option 2: Manual Input",
-    "Загрузить профиль на eSIM": "Download Profile to eSIM",
-    "Свободная память:": "Free memory:",
-    "Провайдер:": "Provider:",
-    "Состояние:": "State:",
-    "Активен": "Active",
-    "Отключен": "Disabled",
-    "Включить": "Enable",
-    "Отключить": "Disable",
-    "Переименовать": "Rename",
-    "Удалить": "Delete",
-    "Неизвестно": "Unknown",
-    "Нет установленных профилей.": "No installed profiles.",
-    "Ошибка:": "Error:",
-    "Загрузка...": "Loading...",
-    "Пожалуйста, ждите...": "Please wait...",
-    "Профиль успешно удален": "Profile successfully deleted",
-    "Имя профиля изменено": "Profile name changed",
-    "QR-код успешно распознан!": "QR code successfully recognized!",
-    "Не удалось найти или прочитать QR-код на изображении": "Could not find or read QR code on image",
-    "Библиотека декодирования QR еще не загружена. Проверьте интернет соединение.": "QR decoding library not loaded yet. Check internet connection.",
-    "Пожалуйста, загрузите QR-код или заполните SM-DP+ и код активации": "Please upload QR code or fill in SM-DP+ and activation code",
-    "Загрузка профиля (может занять до 2-х минут)...": "Downloading profile (may take up to 2 minutes)...",
-    "Профиль успешно загружен!": "Profile successfully downloaded!",
-    "Текущий APN интерфейса": "Current interface APN",
-    "(не задан)": "(not set)",
-    "Не удалось загрузить APN:": "Failed to load APN:",
-    "APN успешно сохранен!": "APN successfully saved!",
-    "Ошибка сохранения APN:": "Failed to save APN:",
-    "Вы уверены, что хотите включить этот профиль? Модем может перезагрузиться.": "Are you sure you want to enable this profile? The modem might reboot.",
-    "Вы уверены, что хотите отключить этот профиль? Модем может перезагрузиться.": "Are you sure you want to disable this profile? The modem might reboot.",
-    "ВНИМАНИЕ! Удаление профиля необратимо. Вы уверены?": "WARNING! Deleting a profile is irreversible. Are you sure?",
-    "Введите новое имя профиля:": "Enter new profile name:",
-    "Отключите профиль перед удалением": "Disable profile before deletion",
-    "Неизвестная ошибка": "Unknown error",
-    "Ошибка удаления:": "Error deleting:",
-    "Ошибка переименования:": "Error renaming:",
-    "Ошибка загрузки:": "Error downloading:",
-    "Модемный интерфейс не обнаружен": "Modem interface not detected",
-    "Пожалуйста, подключите модем, проверьте питание и убедитесь, что служба ModemManager активна.": "Please connect a modem, check power, and verify that ModemManager is running.",
-    "Перезапустить ModemManager": "Restart ModemManager",
-    "Перезапустить интерфейс MODEM": "Restart MODEM interface",
-    "Применение настроек...": "Applying settings...",
-    "Пожалуйста, подождите, выполняется операция перезапуска...": "Please wait, restarting operation is running...",
-    "Пожалуйста, подождите, выполняется перезапуск (около 6 сек)...": "Please wait, restarting (about 6 sec)...",
-    
-    // Missing eSIM strings
-    "Например: plus, globaldata, internet.proximus.be": "e.g. plus, globaldata, internet.proximus.be",
-    "SM-DP+ Server (например: lpa.example.com)": "SM-DP+ Server (e.g. lpa.example.com)",
-    "Confirmation Code (если требуется)": "Confirmation Code (if required)"
-};
-
-function _t(str) {
-    if (!str) return str;
-    const lang = localStorage.getItem('modem_lang') || 'ru';
-    if (lang === 'ru') return str;
-    return dict[str] || str;
-}
-
-function changeLanguage(lang) {
-    localStorage.setItem('modem_lang', lang);
-    document.cookie = "modem_lang=" + lang + "; path=/; max-age=31536000";
-    const selects = document.querySelectorAll('#lang_select');
-    selects.forEach(s => s.value = lang);
-    translatePage(lang);
-}
-
-function translatePage(lang) {
-    const elements = document.querySelectorAll('h3, h4, h5, p, label, button, span, strong, option, th, td, a, div.sim-row, div.ant-label, small, div, input, select');
-    const sortedKeys = Object.keys(dict).sort((a, b) => b.length - a.length);
-    elements.forEach(el => {
-        // Translate text nodes
-        let hasTextChild = false;
-        for (let node of el.childNodes) {
-            if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0) {
-                hasTextChild = true;
-                break;
-            }
-        }
-        if (hasTextChild) {
-            if (!el.hasAttribute('data-ru')) {
-                el.setAttribute('data-ru', el.innerHTML);
-            }
-            const origRu = el.getAttribute('data-ru');
-            if (lang === 'en') {
-                let translated = origRu;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.innerHTML = translated;
-            } else {
-                el.innerHTML = origRu;
-            }
-        }
-
-        // Translate placeholders
-        if (el.placeholder) {
-            if (!el.hasAttribute('data-placeholder-ru')) {
-                el.setAttribute('data-placeholder-ru', el.placeholder);
-            }
-            const origPl = el.getAttribute('data-placeholder-ru');
-            if (lang === 'en') {
-                let translated = origPl;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.placeholder = translated;
-            } else {
-                el.placeholder = origPl;
-            }
-        }
-
-        // Translate titles
-        if (el.title) {
-            if (!el.hasAttribute('data-title-ru')) {
-                el.setAttribute('data-title-ru', el.title);
-            }
-            const origTitle = el.getAttribute('data-title-ru');
-            if (lang === 'en') {
-                let translated = origTitle;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.title = translated;
-            } else {
-                el.title = origTitle;
-            }
-        }
-    });
-}
-
-// Init
-window.onload = function() {
-    loadStatus();
-    loadProfiles();
-    loadAPN();
-    const currentLang = localStorage.getItem('modem_lang') || 'ru';
-    document.cookie = "modem_lang=" + currentLang + "; path=/; max-age=31536000";
-    const select = document.getElementById('lang_select');
-    if (select) select.value = currentLang;
-    setTimeout(() => translatePage(currentLang), 100);
-};
-</script>
-
-<% end %>
-<%+footer%>
-
-EOF
-
-echo "Deploying /usr/lib/lua/luci/view/modem/ussd.htm..."
-cat << \EOF > /usr/lib/lua/luci/view/modem/ussd.htm
-<%+header%>
-<%
-    local http = require "luci.http"
-
-    local act = http.formvalue("action")
-    if act == "restart_mm" then
-        os.execute("/etc/init.d/modemmanager restart")
-        os.execute("sleep 6")
-        http.redirect(http.getenv("REQUEST_URI"):gsub("%?.*$", ""))
-        return
-    elseif act == "restart_iface" then
-        os.execute("ifdown MODEM && sleep 3 && ifup MODEM")
-        os.execute("sleep 6")
-        http.redirect(http.getenv("REQUEST_URI"):gsub("%?.*$", ""))
-        return
-    end
-
-    local function exec(cmd)
-        local h = io.popen(cmd .. " 2>&1")
-        if h then
-            local res = h:read("*a")
-            h:close()
-            return res or ""
-        end
-        return ""
-    end
-
-    local function exec_with_recovery(cmd)
-        local out = exec(cmd)
-        local err_lower = out:lower()
-        if err_lower:match("error") or err_lower:match("timeout") or err_lower:match("not supported") or err_lower:match("operation not supported") then
-            os.execute("ifdown MODEM && /etc/init.d/modemmanager restart && sleep 5 && ifup MODEM && sleep 5")
-            out = exec(cmd)
-        end
-        return out
-    end
-
-    
-    local m_list = exec("mmcli -L") or ""
-    local has_modem = (m_list:match("ModemManager1/Modem/(%d+)") ~= nil)
-    local mmcli_idx = "any"
-    local id = m_list:match("ModemManager1/Modem/(%d+)")
-    if id then mmcli_idx = id end
-
-    local mmcli_out = ""
-    local modes = ""
-    local bands = ""
-    local has_2g3g = false
-    local has_bands = false
-    local ussd_status = "idle"
-    local ussd_reply = ""
-    local action = http.formvalue("ussd_action")
-    local cmd_val = http.formvalue("ussd_cmd")
-    local response_msg = ""
-    local error_msg = ""
-
-    if has_modem then
-        mmcli_out = exec("mmcli -m " .. mmcli_idx)
-        modes = mmcli_out:match("Modes.-allowed:%s*([^;\n]+)") or ""
-        bands = mmcli_out:match("Bands.-current:%s*([^;\n]+)") or ""
-        has_2g3g = modes:match("2g") or modes:match("3g") or modes:match("any")
-        has_bands = bands:match("gsm") or bands:match("utran") or bands:match("any")
-
-        local status_out = exec("mmcli -m " .. mmcli_idx .. " --3gpp-ussd-status")
-        ussd_status = status_out:match("status:%s*([^\n]+)") or "unknown"
-        ussd_status = ussd_status:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-        ussd_reply = status_out:match("network request:%s*([^\n]+)") or status_out:match("network response:%s*([^\n]+)") or ""
-        ussd_reply = ussd_reply:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-
-        if action == "initiate" and cmd_val and cmd_val ~= "" then
-            local safe_cmd = cmd_val:gsub("'", ""):gsub('"', "")
-            local res = exec_with_recovery(string.format("mmcli -m %s --timeout=30 --3gpp-ussd-initiate='%s'", mmcli_idx, safe_cmd))
-            if res:match("successfully initiated") or res:match("network response:") then
-                response_msg = res:match("network response:%s*([^\n]+)") or "USSD отправлен."
-                response_msg = response_msg:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-                ussd_status = "active"
-            else
-                error_msg = res
-            end
-            -- re-read status
-            status_out = exec("mmcli -m " .. mmcli_idx .. " --3gpp-ussd-status")
-            local new_status = status_out:match("status:%s*([^\n]+)")
-            if new_status then
-                ussd_status = new_status:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-            end
-            local new_reply = status_out:match("network request:%s*([^\n]+)") or status_out:match("network response:%s*([^\n]+)")
-            if new_reply then
-                ussd_reply = new_reply:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-            else
-                ussd_reply = response_msg
-            end
-        elseif action == "respond" and cmd_val and cmd_val ~= "" then
-            local safe_cmd = cmd_val:gsub("'", ""):gsub('"', "")
-            local res = exec_with_recovery(string.format("mmcli -m %s --timeout=30 --3gpp-ussd-respond='%s'", mmcli_idx, safe_cmd))
-            if res:match("successfully responded") or res:match("network response:") then
-                response_msg = res:match("network response:%s*([^\n]+)") or "Ответ отправлен."
-                response_msg = response_msg:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-            else
-                error_msg = res
-            end
-            status_out = exec("mmcli -m " .. mmcli_idx .. " --3gpp-ussd-status")
-            local new_status = status_out:match("status:%s*([^\n]+)")
-            if new_status then
-                ussd_status = new_status:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-            end
-            local new_reply = status_out:match("network request:%s*([^\n]+)") or status_out:match("network response:%s*([^\n]+)")
-            if new_reply then
-                ussd_reply = new_reply:gsub("^['\"]", ""):gsub("['\"]$", ""):gsub("^%s*", ""):gsub("%s*$", "")
-            else
-                ussd_reply = response_msg
-            end
-        elseif action == "cancel" then
-            exec("mmcli -m " .. mmcli_idx .. " --3gpp-ussd-cancel")
-            ussd_status = "idle"
-            ussd_reply = ""
-        end
-    end
-%>
-
-<div class="cbi-section">
-    <div class="cbi-section-node" style="padding: 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <h3 style="margin-bottom: 5px; color: #ffffff;">USSD Команды</h3>
-        </div>
-        <div style="display: flex; align-items: center; gap: 6px; background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); height: fit-content; margin-right: 15px;">
-            <span style="font-size: 12px; color: #94a3b8;">🌐 Language:</span>
-            <select id="lang_select" onchange="changeLanguage(this.value)" style="background: transparent; color: #f8fafc; border: none; font-size: 12px; cursor: pointer; outline: none; padding: 0 4px; font-weight: 500;">
-                <option value="ru" style="background: #1e293b; color: #f8fafc;">RU</option>
-                <option value="en" style="background: #1e293b; color: #f8fafc;">EN</option>
-            </select>
-        </div>
-    </div>
-</div>
-
-<% if not has_modem then %>
-    <div style="background: #1e293b; border-left: 4px solid #ef4444; border-radius: 8px; padding: 24px; text-align: center; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); font-family: sans-serif;">
-        <h3 style="color: #ef4444; margin-top: 0; font-size: 20px;">⚠️ Модемный интерфейс не обнаружен</h3>
-        <p style="color: #94a3b8; margin: 0; font-size: 14px; margin-bottom: 20px;">Пожалуйста, подключите модем, проверьте питание и убедитесь, что служба ModemManager активна.</p>
-        
-        <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
-            <a href="?action=restart_mm" style="display: inline-block; padding: 8px 16px; background-color: #3b82f6; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск службы ModemManager...')">Перезапустить ModemManager</a>
-            <a href="?action=restart_iface" style="display: inline-block; padding: 8px 16px; background-color: #f59e0b; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 13px; font-family: sans-serif;" onclick="showRecoveryOverlay('Перезапуск интерфейса MODEM...')">Перезапустить интерфейс MODEM</a>
-        </div>
-    </div>
-
-    <div id="apply_overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.95); z-index:99999; justify-content:center; align-items:center; flex-direction:column; color:#fff; font-family:sans-serif; backdrop-filter:blur(5px);">
-        <div class="spinning" style="width:60px; height:60px; border:4px solid #334155; border-top-color:#3b82f6; border-radius:50%; animation:spin 1s linear infinite; margin-bottom:20px;"></div>
-        <div id="overlay_title" style="font-size:20px; font-weight:bold; color:#f8fafc;">Применение настроек...</div>
-        <div id="overlay_subtitle" style="font-size:14px; color:#94a3b8; margin-top:8px; text-align:center; max-width:400px; padding:0 20px; line-height:1.5;">Пожалуйста, подождите, выполняется операция перезапуска...</div>
-    </div>
-    <style>
-    @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-    <script>
-    function showRecoveryOverlay(title) {
-        document.getElementById('overlay_title').innerText = title;
-        document.getElementById('overlay_subtitle').innerText = "Пожалуйста, подождите, выполняется перезапуск (около 6 сек)...";
-        document.getElementById('apply_overlay').style.display = 'flex';
-    }
-    </script>
-<% else %>
-
-<style>
-.ussd-dash { background-color:#1e293b; color:#d1d5db; padding:20px; border-radius:6px; margin-bottom:15px; font-family:sans-serif;}
-.ussd-input { width:100%; max-width:300px; background:#0f172a; color:#fff; border:1px solid #3b82f6; padding:8px 12px; border-radius:4px; outline:none; }
-.btn-action { background:#3b82f6; color:#fff; border:none; padding:8px 15px; border-radius:4px; cursor:pointer; font-weight:bold; }
-.btn-danger { background:#ef4444; }
-.reply-box { background:#0f172a; border:1px solid #4ade80; padding:15px; border-radius:6px; margin-top:15px; color:#4ade80; white-space:pre-wrap; }
-.err-box { background:#7f1d1d; border-left:4px solid #ef4444; padding:10px 15px; margin-bottom:15px; color:#fca5a5; }
-.warn-box { background:#78350f; border-left:4px solid #f59e0b; padding:10px 15px; margin-bottom:15px; color:#fcd34d; }
-#timer-box { font-size: 20px; font-weight: bold; color: #ef4444; margin-top:10px; display:none; }
-</style>
-
-<div class="ussd-dash">
-    <% if not has_2g3g or not has_bands then %>
-    <div class="warn-box">
-        <strong>Внимание:</strong> Похоже, модем не находится в режиме 2G/3G или нужные диапазоны отключены. 
-        USSD работает преимущественно в сетях 2G/3G. Текущие режимы: <%=modes%>.
-    </div>
-    <% end %>
-
-    <% if error_msg ~= "" then %>
-        <div class="err-box">Ошибка выполнения: <%=error_msg%></div>
-    <% end %>
-
-    <div style="margin-bottom: 20px;">
-        <strong>Статус сессии:</strong> 
-        <span style="color:<%= ussd_status == 'idle' and '#94a3b8' or '#4ade80' %>;"><%=ussd_status:upper()%></span>
-    </div>
-
-    <% if ussd_status == "idle" or ussd_status == "unknown" then %>
-        <form method="post" action="<%=luci.dispatcher.build_url('admin/modem/ussd')%>">
-            <label style="display:block; margin-bottom:5px;">Отправить USSD команду:</label>
-            <div style="display:flex; gap:10px;">
-                <input type="text" name="ussd_cmd" class="ussd-input" placeholder="*100#" required>
-                <button type="submit" name="ussd_action" value="initiate" class="btn-action">Выполнить</button>
-            </div>
-        </form>
-        
-        <% if ussd_reply ~= "" then %>
-            <div class="reply-box"><strong>Последний ответ:</strong><br><br><%=ussd_reply%></div>
-        <% end %>
-
-    <% else %>
-        <!-- Сессия активна (user-response) -->
-        <div class="reply-box" style="border-color:#3b82f6; color:#60a5fa;">
-            <strong>Пришел ответ (требуется ваше действие):</strong><br><br><%=ussd_reply%>
-        </div>
-        
-        <div id="timer-box">Сессия закроется через: <span id="time-left">60</span> сек</div>
-        
-        <form id="ussd-form" method="post" action="<%=luci.dispatcher.build_url('admin/modem/ussd')%>" style="margin-top:20px;">
-            <label style="display:block; margin-bottom:5px;">Ваш ответ:</label>
-            <div style="display:flex; gap:10px;">
-                <input type="text" name="ussd_cmd" class="ussd-input" placeholder="Введите номер пункта..." required>
-                <button type="submit" name="ussd_action" value="respond" class="btn-action">Ответить</button>
-                <button type="submit" name="ussd_action" value="cancel" class="btn-action btn-danger" formnovalidate>Прервать (Cancel)</button>
-            </div>
-        </form>
-        
-        <script>
-            document.getElementById('timer-box').style.display = 'block';
-            let timeLeft = 60;
-            let timerSpan = document.getElementById('time-left');
-            let form = document.getElementById('ussd-form');
-            
-            let interval = setInterval(function() {
-                timeLeft--;
-                timerSpan.innerText = timeLeft;
-                if(timeLeft <= 0) {
-                    clearInterval(interval);
-                    // авто-отмена
-                    let input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = 'ussd_action';
-                    input.value = 'cancel';
-                    form.appendChild(input);
-                    form.submit();
-                }
-            }, 1000);
-        </script>
-    <% end %>
-</div>
-
-<script>
-// Language Translation Logic
-const dict = {
-    "USSD Команды": "USSD Commands",
-    "⚠️ Модемный интерфейс не обнаружен": "⚠️ Modem interface not detected",
-    "Пожалуйста, подключите модем, проверьте питание и убедитесь, что служба ModemManager активна.": "Please connect a modem, check power, and verify that ModemManager is running.",
-    "Перезапустить ModemManager": "Restart ModemManager",
-    "Перезапустить интерфейс MODEM": "Restart MODEM interface",
-    "Применение настроек...": "Applying settings...",
-    "Пожалуйста, подождите, выполняется операция перезапуска...": "Please wait, restarting...",
-    "Перезапуск службы ModemManager...": "Restarting ModemManager service...",
-    "Перезапуск интерфейса MODEM...": "Restarting MODEM interface...",
-    "Отправить USSD команду:": "Send USSD command:",
-    "Выполнить": "Execute",
-    "Последний ответ:": "Last response:",
-    "Пришел ответ (требуется ваше действие):": "Response received (your action is required):",
-    "Сессия закроется через:": "Session will close in:",
-    " сек": " sec",
-    "Ваш ответ:": "Your response:",
-    "Ответить": "Respond",
-    "Прервать (Cancel)": "Cancel",
-    "Сессия закроется через: ": "Session will close in: "
-};
-
-function _t(str) {
-    if (!str) return str;
-    const lang = localStorage.getItem('modem_lang') || 'ru';
-    if (lang === 'ru') return str;
-    return dict[str] || str;
-}
-
-function changeLanguage(lang) {
-    localStorage.setItem('modem_lang', lang);
-    document.cookie = "modem_lang=" + lang + "; path=/; max-age=31536000";
-    const selects = document.querySelectorAll('#lang_select');
-    selects.forEach(s => s.value = lang);
-    translatePage(lang);
-}
-
-function translatePage(lang) {
-    const elements = document.querySelectorAll('h3, h4, h5, p, label, button, span, strong, option, th, td, a, div, input, select');
-    const sortedKeys = Object.keys(dict).sort((a, b) => b.length - a.length);
-    elements.forEach(el => {
-        // Translate text nodes
-        let hasTextChild = false;
-        for (let node of el.childNodes) {
-            if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0) {
-                hasTextChild = true;
-                break;
-            }
-        }
-        if (hasTextChild) {
-            if (!el.hasAttribute('data-ru')) {
-                el.setAttribute('data-ru', el.innerHTML);
-            }
-            const origRu = el.getAttribute('data-ru');
-            if (lang === 'en') {
-                let translated = origRu;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.innerHTML = translated;
-            } else {
-                el.innerHTML = origRu;
-            }
-        }
-
-        // Translate placeholders
-        if (el.placeholder) {
-            if (!el.hasAttribute('data-placeholder-ru')) {
-                el.setAttribute('data-placeholder-ru', el.placeholder);
-            }
-            const origPl = el.getAttribute('data-placeholder-ru');
-            if (lang === 'en') {
-                let translated = origPl;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.placeholder = translated;
-            } else {
-                el.placeholder = origPl;
-            }
-        }
-
-        // Translate titles
-        if (el.title) {
-            if (!el.hasAttribute('data-title-ru')) {
-                el.setAttribute('data-title-ru', el.title);
-            }
-            const origTitle = el.getAttribute('data-title-ru');
-            if (lang === 'en') {
-                let translated = origTitle;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.title = translated;
-            } else {
-                el.title = origTitle;
-            }
-        }
-    });
-}
-
-// Initial language setup
-const currentLang = localStorage.getItem('modem_lang') || 'ru';
-document.cookie = "modem_lang=" + currentLang + "; path=/; max-age=31536000";
-const select = document.getElementById('lang_select');
-if (select) select.value = currentLang;
-setTimeout(() => translatePage(currentLang), 100);
-</script>
-
-<% end %>
-<%+footer%>
-
-EOF
-
-echo "Deploying /usr/bin/sms_sync.lua..."
-cat << \EOF > /usr/bin/sms_sync.lua
-#!/usr/bin/lua
-
-local jsonc = require "luci.jsonc"
-
-local ARCHIVE_FILE = "/etc/sms_archive.json"
-local LOCK_DIR = "/var/run/sms_sync.lock"
-
--- Простая блокировка (atomic), чтобы два процесса не запустились одновременно
--- /var/run/ очищается при перезагрузке, поэтому "вечной" блокировки при ребуте не будет
-local lock_status = os.execute("mkdir " .. LOCK_DIR .. " 2>/dev/null")
-if lock_status ~= 0 and lock_status ~= true then
-    -- Скрипт уже запущен другим процессом (кроном или веб-страницей)
-    return
-end
-
-local function exec(cmd)
-    local safe_cmd = cmd
-    if not cmd:match("^timeout%s") then
-        safe_cmd = "timeout 5 " .. cmd
-    end
-    local h = io.popen(safe_cmd .. " 2>/dev/null")
-    if h then
-        local res = h:read("*a")
-        h:close()
-        return res or ""
-    end
-    return ""
-end
-
-local function parse_iso_time(ts_str)
-    if not ts_str or ts_str == "-" then return nil end
-    local y, m, d, h, min, sec = ts_str:match("(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)")
-    if y and m and d and h and min and sec then
-        return os.time({year=tonumber(y), month=tonumber(m), day=tonumber(d), hour=tonumber(h), min=tonumber(min), sec=tonumber(sec)})
-    end
-    return nil
-end
-
--- 1. Чтение текущего архива
-local archive = {}
-local f = io.open(ARCHIVE_FILE, "r")
-if f then
-    local content = f:read("*a")
-    f:close()
-    if content and content ~= "" then
-        archive = jsonc.parse(content) or {}
-    end
-end
-
--- Функция генерации уникального ID для сообщения
-local function generate_id()
-    return tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999))
-end
-
-math.randomseed(os.time())
-
--- 2. Получение списка SMS
-local mmcli_idx = "any"
-local list_out = exec("mmcli -m " .. mmcli_idx .. " --messaging-list-sms")
-local new_sms_count = 0
-
-for path, idx, state in list_out:gmatch("(/org/freedesktop/ModemManager1/SMS/(%d+)) %(([^%)]+)%)") do
-    if state ~= "sending" then
-        local sms_details = exec("mmcli -s " .. idx)
-        
-        local num = sms_details:match("number:%s*([^\n]+)") or "Неизвестно"
-        num = num:gsub("^%s*", ""):gsub("%s*$", ""):gsub("^['\"]", ""):gsub("['\"]$", "")
-        
-        local ts = sms_details:match("timestamp:%s*([^\n]+)") or "-"
-        ts = ts:gsub("^%s*", ""):gsub("%s*$", ""):gsub("^['\"]", ""):gsub("['\"]$", "")
-
-        local pdu = sms_details:match("pdu type:%s*([^\n]+)") or ""
-        
-        local mapped_state = "received"
-        if state == "sent" or pdu == "submit" then
-            mapped_state = "sent"
-        end
-        
-        local txt = sms_details:match("text:%s*(.-)\n%s*[%a]+%s*|") or sms_details:match("text:%s*(.-)\n%s*%-") or sms_details:match("text:%s*(.*)") or ""
-        txt = txt:gsub("^%s*", ""):gsub("%s*$", "")
-        
-        -- Если текста нет, пробуем прочитать как бинарное сообщение
-        if txt == "" then
-            local data = sms_details:match("data:%s*([^\n]+)")
-            if data then txt = "[Бинарные данные: " .. data .. "]" end
-        end
-
-        -- Защита от мусора (Cell Broadcasts, пустые глючные SMS и т.д.)
-        -- Мы не добавляем в архив, если нет ни текста, ни нормального номера
-        local is_junk = false
-        if pdu == "cbs" or state == "unknown" then
-            if txt == "" or num == "Неизвестно" then
-                is_junk = true
-            end
-        end
-        
-        -- Если это 'receiving' и текста всё ещё нет - скорее всего оно недокачано, 
-        -- просто проигнорируем его пока что, не удаляя из модема, ЕСЛИ оно не старое
-        if state == "receiving" and txt == "" then
-            local ts_epoch = parse_iso_time(ts)
-            if ts_epoch and (os.time() - ts_epoch > 21600) then -- старше 6 часов
-                -- Удаляем застрявший фрагмент, чтобы освободить память модема
-                exec(string.format("mmcli -m %s --messaging-delete-sms=%s", mmcli_idx, idx))
-            end
-        else
-            if not is_junk and txt ~= "" then
-                local is_duplicate = false
-                for _, existing in ipairs(archive) do
-                    if existing.number == num and existing.timestamp == ts and existing.text == txt then
-                        is_duplicate = true
-                        break
-                    end
-                end
-                
-                if not is_duplicate then
-                    table.insert(archive, {
-                        id = generate_id(),
-                        state = mapped_state,
-                        number = num,
-                        text = txt,
-                        timestamp = ts,
-                        saved_at = os.time()
-                    })
-                    new_sms_count = new_sms_count + 1
-                end
-            end
-            
-            -- Удаляем сообщение из модема (даже если это мусор, чтобы не забивало память)
-            exec(string.format("mmcli -m %s --messaging-delete-sms=%s", mmcli_idx, idx))
-        end
-    end
-end
-
--- 4. Сохранение архива, если есть новые сообщения
-if new_sms_count > 0 then
-    local out_f = io.open(ARCHIVE_FILE, "w")
-    if out_f then
-        -- Сериализация JSON (pretty=false, т.к. jsonc в luci может не принимать 2 аргумента, 
-        -- но мы вызовем обычный stringify)
-        out_f:write(jsonc.stringify(archive))
-        out_f:close()
-    end
-end
-
--- Снимаем блокировку
-os.execute("rmdir " .. LOCK_DIR)
-
-
-EOF
-
 echo "Deploying /usr/bin/modem_speed_daemon.lua..."
 cat << \EOF > /usr/bin/modem_speed_daemon.lua
 local json = require "luci.jsonc"
@@ -6609,861 +5256,6 @@ start_service() {
 
 EOF
 
-echo "Deploying /usr/lib/lua/luci/view/modem/pingcheck.htm..."
-cat << \EOF > /usr/lib/lua/luci/view/modem/pingcheck.htm
-<%+header%>
-<%
-    -- Check if initial logs exist
-    local sys = require "luci.sys"
-    local has_log = (os.execute("test -f /tmp/pingcheck.log") == 0)
-%>
-
-<div class="cbi-section">
-    <div class="cbi-section-node" style="padding: 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <h3 style="margin-bottom: 5px; color: #ffffff;">Мониторинг доступности интернета (Internet Availability)</h3>
-            <p style="color: #94a3b8; margin: 0; font-size: 13px;">Фоновый контроль соединения на интерфейсе wwan0 с автоматическим сбором логов при сбоях.</p>
-        </div>
-        <div style="display: flex; align-items: center; gap: 6px; background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); height: fit-content; margin-right: 15px;">
-            <span style="font-size: 12px; color: #94a3b8;">🌐 Language:</span>
-            <select id="lang_select" onchange="changeLanguage(this.value)" style="background: transparent; color: #f8fafc; border: none; font-size: 12px; cursor: pointer; outline: none; padding: 0 4px; font-weight: 500;">
-                <option value="ru" style="background: #1e293b; color: #f8fafc;">RU</option>
-                <option value="en" style="background: #1e293b; color: #f8fafc;">EN</option>
-            </select>
-        </div>
-    </div>
-</div>
-
-<style>
-/* Glassmorphism theme styles matching modeminfo.htm */
-.pc-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 20px;
-    margin-bottom: 25px;
-}
-.pc-card {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 24px;
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    position: relative;
-    overflow: hidden;
-}
-.pc-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 4px;
-}
-.card-status::before { background: #3b82f6; }
-.card-stats::before { background: #8b5cf6; }
-
-.pc-label {
-    font-size: 12px;
-    color: #94a3b8;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    margin-bottom: 8px;
-}
-.status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 28px;
-    font-weight: 800;
-    font-family: 'Outfit', 'Inter', sans-serif;
-    line-height: 1;
-    margin: 10px 0;
-}
-.status-duration {
-    font-size: 14px;
-    color: #cbd5e1;
-    margin-top: 4px;
-    font-family: monospace;
-}
-
-/* Timeline visualization styling */
-.timeline-container {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 24px;
-    margin-bottom: 25px;
-}
-.timeline-bar-wrapper {
-    position: relative;
-    margin: 20px 0 10px 0;
-}
-.timeline-bar {
-    height: 32px;
-    background-color: #10b981; /* Default online state (green) */
-    border-radius: 6px;
-    position: relative;
-    overflow: hidden;
-    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
-}
-.timeline-segment-down {
-    position: absolute;
-    top: 0;
-    height: 100%;
-    background-color: #ef4444; /* Offline state (red) */
-    cursor: pointer;
-    transition: background-color 0.2s;
-}
-.timeline-segment-down:hover {
-    background-color: #f87171;
-}
-.timeline-labels {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: #94a3b8;
-    font-family: monospace;
-    margin-top: 6px;
-}
-
-/* Tooltip style */
-.pc-tooltip {
-    position: absolute;
-    background: #0f172a;
-    color: #ffffff;
-    padding: 8px 12px;
-    border-radius: 6px;
-    border: 1px solid #475569;
-    font-size: 12px;
-    font-family: monospace;
-    z-index: 100;
-    pointer-events: none;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
-    display: none;
-    line-height: 1.4;
-}
-
-/* Tables and logs management */
-.panel-card {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 20px;
-    margin-bottom: 25px;
-}
-.panel-header {
-    border-bottom: 1px solid #334155;
-    padding-bottom: 10px;
-    margin-bottom: 15px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.panel-title {
-    margin: 0;
-    color: #ffffff;
-    font-weight: 500;
-    font-size: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.pc-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-    text-align: left;
-}
-.pc-table th {
-    padding: 10px 12px;
-    background: #0f172a;
-    color: #94a3b8;
-    font-weight: 600;
-    border-bottom: 2px solid #334155;
-}
-.pc-table td {
-    padding: 10px 12px;
-    border-bottom: 1px solid #334155;
-    color: #d1d5db;
-}
-.pc-table tr:hover td {
-    background: rgba(51, 65, 85, 0.2);
-}
-
-.badge-up {
-    background: rgba(16, 185, 129, 0.15);
-    color: #34d399;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-weight: bold;
-    font-size: 11px;
-}
-.badge-down {
-    background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-weight: bold;
-    font-size: 11px;
-}
-
-/* Pulse animation */
-@keyframes pc-pulse {
-    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
-    70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
-    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
-}
-@keyframes pc-pulse-red {
-    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
-    70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-}
-
-.pulse-green {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: #10b981;
-    animation: pc-pulse 2s infinite;
-}
-.pulse-red {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: #ef4444;
-    animation: pc-pulse-red 1.5s infinite;
-}
-</style>
-
-<!-- Warning Banner for inactive daemon -->
-<div id="daemon_warning_banner" style="display: none; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; align-items: center; gap: 12px;">
-    <svg style="width:24px; height:24px; color:#ef4444; flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-    </svg>
-    <div>
-        <strong style="color: #ffffff; display: block; font-size: 14px;">Фоновая служба мониторинга не запущена!</strong>
-        <span style="color: #94a3b8; font-size: 12px;">Пожалуйста, проверьте статус службы `/etc/init.d/pingcheck`. Статистика и данные о сбоях могут быть неактуальными.</span>
-    </div>
-</div>
-
-<div class="pc-grid">
-    <!-- Status Card -->
-    <div class="pc-card card-status">
-        <div class="pc-label">Текущее состояние связи</div>
-        <div class="status-badge" id="current_status">
-            <span class="pulse-green"></span>
-            <span style="color: #10b981;">ONLINE</span>
-        </div>
-        <div class="status-duration" id="current_duration">Непрерывная работа: --</div>
-        <div style="font-size:11px; color:#94a3b8; margin-top: 8px;" id="last_check_time_label">Обновлено: --</div>
-    </div>
-    
-    <!-- Stats Card -->
-    <div class="pc-card card-stats">
-        <div class="pc-label">Статистика за текущую сессию</div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 5px;">
-            <div>
-                <span style="display:block; color:#94a3b8; font-size:11px;">СБОЕВ ИНТЕРНЕТА:</span>
-                <strong style="font-size:22px; color:#ffffff; font-family:sans-serif;" id="stat_drops_count">0</strong>
-            </div>
-            <div>
-                <span style="display:block; color:#94a3b8; font-size:11px;">ОБЩЕЕ ВРЕМЯ ПРОСТОЯ:</span>
-                <strong style="font-size:22px; color:#ef4444; font-family:sans-serif;" id="stat_total_downtime">0s</strong>
-            </div>
-        </div>
-        <div style="font-size:12px; color:#94a3b8; margin-top:12px;" id="stat_uptime_percent">Доступность линии: 100.00%</div>
-    </div>
-</div>
-
-<!-- Timeline Card -->
-<div class="timeline-container">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h4 style="margin: 0; border: none; padding: 0; color: #ffffff; font-weight: normal; font-size: 15px;">Таймлайн аптайма (История за 24ч)</h4>
-        <span style="font-size: 12px; color: #94a3b8;" id="timeline_span_label">Обнаружено событий: 0</span>
-    </div>
-    
-    <div class="timeline-bar-wrapper">
-        <div class="timeline-bar" id="timeline_bar"></div>
-        <div class="timeline-labels">
-            <span id="timeline_label_start">--:--:--</span>
-            <span>Срез времени доступности</span>
-            <span id="timeline_label_end">--:--:--</span>
-        </div>
-    </div>
-</div>
-
-<!-- Custom Tooltip element -->
-<div class="pc-tooltip" id="pc_tooltip"></div>
-
-<!-- Transition Logs Table -->
-<div class="panel-card">
-    <div class="panel-header">
-        <h4 class="panel-title">
-            <svg style="width:16px; height:16px; color:#3b82f6;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            История переходов и инцидентов
-        </h4>
-        <button type="button" onclick="clearLogs()" style="background: #ef4444; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px; outline: none; transition: all 0.2s ease;">Очистить лог</button>
-    </div>
-    
-    <div style="max-height: 300px; overflow-y: auto;">
-        <table class="pc-table" id="logs_table">
-            <thead>
-                <tr>
-                    <th style="width: 30%;">Время события</th>
-                    <th style="width: 25%;">Состояние</th>
-                    <th>Детали сбоя</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td colspan="3" style="text-align: center; color: #94a3b8;">Загрузка логов переходов...</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-<!-- Diagnostics / Bug Reports -->
-<div class="panel-card">
-    <div class="panel-header">
-        <h4 class="panel-title">
-            <svg style="width:16px; height:16px; color:#f59e0b;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-            </svg>
-            Архив багрепортов (сбои > 10 секунд)
-        </h4>
-        <span style="color:#94a3b8; font-size:12px;">Снимаются автоматически ровно один раз при падении</span>
-    </div>
-    
-    <table class="pc-table" id="bugreports_table">
-        <thead>
-            <tr>
-                <th>Имя файла</th>
-                <th>Размер</th>
-                <th>Дата сбора</th>
-                <th style="width: 200px; text-align: center;">Действия</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td colspan="4" style="text-align: center; color: #94a3b8;">Загрузка багрепортов...</td>
-            </tr>
-        </tbody>
-    </table>
-</div>
-
-<script>
-const g=i=>document.getElementById(i);
-
-let activePollId = null;
-let timeSkew = 0;
-
-function getRouterNow() {
-    return Date.now() - timeSkew;
-}
-
-let currentUptimeState = "UNKNOWN";
-let currentUptimeStart = 0;
-let eventsHistory = [];
-
-function formatDuration(sec) {
-    const lang = localStorage.getItem('modem_lang') || 'ru';
-    if (lang === 'en') {
-        if (sec < 60) return sec + " sec";
-        const min = Math.floor(sec / 60);
-        const rSec = sec % 60;
-        if (min < 60) return min + " min " + rSec + " sec";
-        const hr = Math.floor(min / 60);
-        const rMin = min % 60;
-        return hr + " h " + rMin + " min " + rSec + " sec";
-    } else {
-        if (sec < 60) return sec + " сек";
-        const min = Math.floor(sec / 60);
-        const rSec = sec % 60;
-        if (min < 60) return min + " мин " + rSec + " сек";
-        const hr = Math.floor(min / 60);
-        const rMin = min % 60;
-        return hr + " ч " + rMin + " мин " + rSec + " сек";
-    }
-}
-
-function parseDateStr(tsStr) {
-    if (!tsStr) return getRouterNow();
-    if (/^\d+$/.test(tsStr)) {
-        return parseInt(tsStr) * 1000;
-    }
-    const parts = tsStr.match(/^(\d+)-(\d+)-(\d+)\s+(\d+):(\d+):(\d+)$/);
-    if (!parts) return getRouterNow();
-    return Date.UTC(parseInt(parts[1]), parseInt(parts[2])-1, parseInt(parts[3]), parseInt(parts[4]), parseInt(parts[5]), parseInt(parts[6]));
-}
-
-function utcToLocalStr(tsStr) {
-    if (!tsStr) return "";
-    if (/^\d+$/.test(tsStr)) {
-        const date = new Date(parseInt(tsStr) * 1000);
-        const pad = n => n.toString().padStart(2, '0');
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-               `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-    }
-    const parts = tsStr.match(/^(\d+)-(\d+)-(\d+)\s+(\d+):(\d+):(\d+)$/);
-    if (!parts) return tsStr;
-    const utcMs = Date.UTC(parseInt(parts[1]), parseInt(parts[2])-1, parseInt(parts[3]), parseInt(parts[4]), parseInt(parts[5]), parseInt(parts[6]));
-    const localDate = new Date(utcMs);
-    const pad = n => n.toString().padStart(2, '0');
-    return `${localDate.getFullYear()}-${pad(localDate.getMonth() + 1)}-${pad(localDate.getDate())} ` +
-           `${pad(localDate.getHours())}:${pad(localDate.getMinutes())}:${pad(localDate.getSeconds())}`;
-}
-
-function processAvailabilityData(logs) {
-    eventsHistory = [];
-    if (!logs || logs.length === 0) {
-        g('stat_drops_count').innerText = 0;
-        g('stat_total_downtime').innerText = "0s";
-        g('stat_uptime_percent').innerText = "Доступность линии (24ч): 100.00%";
-        g('current_status').innerHTML = '<span class="pulse-green"></span><span style="color:#10b981;">ONLINE</span>';
-        g('current_duration').innerText = "Непрерывная работа: --";
-        g('current_status').parentNode.style.borderColor = "#334155";
-        renderTimelineBar();
-        return;
-    }
-    
-    // Sort chronologically
-    logs.sort((a,b) => parseDateStr(a.timestamp) - parseDateStr(b.timestamp));
-    
-    let totalDrops = 0;
-    let totalDowntimeSec = 0;
-    
-    for (let i = 0; i < logs.length; i++) {
-        const item = logs[i];
-        const stateLower = item.state.toLowerCase();
-        
-        if (stateLower.includes("down")) {
-            totalDrops++;
-            const tStart = parseDateStr(item.timestamp);
-            let tEnd = getRouterNow();
-            let duration = 0;
-            
-            // Find corresponding UP state
-            for (let j = i + 1; j < logs.length; j++) {
-                if (logs[j].state.toLowerCase().includes("up")) {
-                    tEnd = parseDateStr(logs[j].timestamp);
-                    // Extract duration
-                    const durMatch = logs[j].details.match(/Downtime:\s*(\d+)s/);
-                    if (durMatch) {
-                        duration = parseInt(durMatch[1]);
-                    } else {
-                        duration = Math.floor((tEnd - tStart) / 1000);
-                    }
-                    break;
-                }
-            }
-            
-            if (duration === 0) {
-                duration = Math.floor((tEnd - tStart) / 1000);
-            }
-            
-            totalDowntimeSec += duration;
-            
-            eventsHistory.push({
-                start: tStart,
-                end: tEnd,
-                duration: duration,
-                timeStr: item.timestamp
-            });
-        }
-    }
-    
-    // Update Stats Card
-    g('stat_drops_count').innerText = totalDrops;
-    g('stat_total_downtime').innerText = totalDowntimeSec + "s";
-    
-    // Update Current Status Card
-    if (logs.length > 0) {
-        const lastEvent = logs[logs.length - 1];
-        const lastStateLower = lastEvent.state.toLowerCase();
-        const lastTime = parseDateStr(lastEvent.timestamp);
-        
-        let statusHtml = "";
-        let durLabel = "";
-        
-        if (lastStateLower.includes("down")) {
-            statusHtml = '<span class="pulse-red"></span><span style="color:#ef4444;">OFFLINE</span>';
-            const dur = Math.floor((getRouterNow() - lastTime) / 1000);
-            durLabel = _t("Сбой длится:") + " " + formatDuration(dur);
-            g('current_status').parentNode.style.borderColor = "#ef4444";
-        } else {
-            statusHtml = '<span class="pulse-green"></span><span style="color:#10b981;">ONLINE</span>';
-            const dur = Math.floor((getRouterNow() - lastTime) / 1000);
-            durLabel = _t("Непрерывная работа:") + " " + formatDuration(dur);
-            g('current_status').parentNode.style.borderColor = "#334155";
-        }
-        
-        g('current_status').innerHTML = statusHtml;
-        g('current_duration').innerText = durLabel;
-    }
-    
-    renderTimelineBar();
-}
-
-function renderTimelineBar() {
-    const wrapper = g('timeline_bar');
-    if (!wrapper) return;
-    
-    wrapper.innerHTML = "";
-    
-    if (eventsHistory.length === 0) {
-        g('timeline_span_label').innerText = _t("Аптайм линии:") + " 100%";
-        g('stat_uptime_percent').innerText = _t("Доступность линии:") + " 100.00%";
-        
-        const nowStr = new Date().toLocaleTimeString();
-        g('timeline_label_start').innerText = _t("24ч назад");
-        g('timeline_label_end').innerText = nowStr;
-        return;
-    }
-    
-    const now = getRouterNow();
-    const oneDayAgo = now - 24 * 60 * 60 * 1000;
-    
-    // Calculate uptime percentage
-    let totalDowntimeInWindow = 0;
-    eventsHistory.forEach(ev => {
-        const s = Math.max(ev.start, oneDayAgo);
-        const e = Math.min(ev.end, now);
-        if (e > s) {
-            totalDowntimeInWindow += (e - s);
-        }
-    });
-    
-    const totalWindowTime = now - oneDayAgo;
-    const uptimePercent = Math.max(0, Math.min(100, 100 - (totalDowntimeInWindow / totalWindowTime) * 100));
-    g('stat_uptime_percent').innerText = _t("Доступность линии:") + " " + uptimePercent.toFixed(2) + "%";
-    g('timeline_span_label').innerText = _t("Сбоев:") + " " + eventsHistory.length + " (" + _t("Аптайм:") + " " + uptimePercent.toFixed(2) + "%)";
-    
-    g('timeline_label_start').innerText = new Date(oneDayAgo).toLocaleTimeString();
-    g('timeline_label_end').innerText = new Date(now).toLocaleTimeString();
-    
-    // Add red blocks for downtime
-    eventsHistory.forEach(ev => {
-        if (ev.end < oneDayAgo) return; // Older than 24h
-        
-        const startOffset = Math.max(ev.start, oneDayAgo) - oneDayAgo;
-        const duration = Math.min(ev.end, now) - Math.max(ev.start, oneDayAgo);
-        
-        const leftPercent = (startOffset / totalWindowTime) * 100;
-        const widthPercent = Math.max(0.5, (duration / totalWindowTime) * 100); // at least 0.5% width to be visible
-        
-        const segment = document.createElement('div');
-        segment.className = "timeline-segment-down";
-        segment.style.left = leftPercent + "%";
-        segment.style.width = widthPercent + "%";
-        
-        // Show tooltip on hover
-        segment.addEventListener('mouseenter', (e) => {
-            const tooltip = g('pc_tooltip');
-            tooltip.innerHTML = `<strong>${_t('СБОЙ ИНТЕРНЕТА')}</strong><br/>` +
-                                `${_t('Начало:')} ${utcToLocalStr(ev.timeStr)}<br/>` +
-                                `${_t('Длительность:')} ${formatDuration(ev.duration)}`;
-            tooltip.style.display = 'block';
-            
-            const rect = wrapper.getBoundingClientRect();
-            const segRect = segment.getBoundingClientRect();
-            
-            tooltip.style.left = (segRect.left - rect.left + segRect.width/2 - 80) + "px";
-            tooltip.style.top = "-65px";
-        });
-        
-        segment.addEventListener('mouseleave', () => {
-            g('pc_tooltip').style.display = 'none';
-        });
-        
-        wrapper.appendChild(segment);
-    });
-}
-
-function fetchPingcheckData() {
-    const url = '<%=luci.dispatcher.build_url("admin/modem/pingcheck_data")%>';
-    fetch(url)
-        .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                if (data.router_time) {
-                    timeSkew = Date.now() - data.router_time;
-                }
-                // Update Daemon Status Warning Banner
-                const warningBanner = g('daemon_warning_banner');
-                if (data.daemon_running) {
-                    warningBanner.style.display = 'none';
-                } else {
-                    warningBanner.style.display = 'flex';
-                }
-
-                // Update Last Checked Time Label
-                const lastCheckTimeLabel = g('last_check_time_label');
-                if (data.last_check) {
-                    lastCheckTimeLabel.innerText = _t('Обновлено:') + ' ' + utcToLocalStr(data.last_check);
-                } else {
-                    lastCheckTimeLabel.innerText = _t('Обновлено:') + ' --';
-                }
-
-                // 1. Process stats & status
-                processAvailabilityData(data.logs);
-                
-                // 2. Populate logs table
-                const logsBody = g('logs_table').querySelector('tbody');
-                logsBody.innerHTML = "";
-                if (data.logs.length === 0) {
-                    logsBody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #94a3b8;">${_t('Лог мониторинга пуст. Соединение стабильно.')}</td></tr>`;
-                } else {
-                    // Show reverse chronological
-                    const sortedLogs = [...data.logs].reverse();
-                    sortedLogs.forEach(item => {
-                        const tr = document.createElement('tr');
-                        const isUp = item.state.toLowerCase().includes("up");
-                        const start = item.state.toLowerCase().includes("start");
-                        
-                        let badgeHtml = "";
-                        if (start) {
-                            badgeHtml = `<span class="badge-up" style="background:rgba(59,130,246,0.15); color:#60a5fa;">${_t('СТАРТ')}</span>`;
-                        } else if (isUp) {
-                            badgeHtml = `<span class="badge-up">ONLINE</span>`;
-                        } else {
-                            badgeHtml = `<span class="badge-down">OFFLINE</span>`;
-                        }
-                        
-                        tr.innerHTML = `
-                            <td style="font-family: monospace;">${utcToLocalStr(item.timestamp)}</td>
-                            <td>${badgeHtml}</td>
-                            <td style="color: ${isUp ? '#94a3b8' : '#f87171'};">${item.details ? _t(item.details) : (isUp ? _t('Связь успешно восстановлена') : _t('Соединение прервано'))}</td>
-                        `;
-                        logsBody.appendChild(tr);
-                    });
-                }
-                
-                // 3. Populate bugreports table
-                const brBody = g('bugreports_table').querySelector('tbody');
-                brBody.innerHTML = "";
-                if (data.bugreports.length === 0) {
-                    brBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #94a3b8;">${_t('Багрепорты не найдены. Сбоев длиннее 10 сек не зафиксировано.')}</td></tr>`;
-                } else {
-                    // Sort newest first
-                    data.bugreports.sort((a,b) => b.filename.localeCompare(a.filename));
-                    data.bugreports.forEach(br => {
-                        const tr = document.createElement('tr');
-                        
-                        const dlUrl = '<%=luci.dispatcher.build_url("admin/modem/download_bugreport")%>?file=' + encodeURIComponent(br.filename);
-                        
-                        const nameMatch = br.filename.match(/bugreport_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
-                        let displayDate = br.date;
-                        if (nameMatch) {
-                            displayDate = utcToLocalStr(`${nameMatch[1]}-${nameMatch[2]}-${nameMatch[3]} ${nameMatch[4]}:${nameMatch[5]}:${nameMatch[6]}`);
-                        }
-                        
-                        tr.innerHTML = `
-                            <td style="font-family: monospace; font-weight: bold; color: #f59e0b;">${br.filename}</td>
-                            <td>${br.size}</td>
-                            <td>${displayDate}</td>
-                            <td style="text-align: center; display: flex; gap: 8px; justify-content: center;">
-                                <a href="${dlUrl}" style="display: inline-block; padding: 4px 10px; background-color: #3b82f6; color: #ffffff; border-radius: 4px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 11px;">${_t('Скачать')}</a>
-                                <button type="button" onclick="deleteBugreport('${br.filename}')" style="display: inline-block; padding: 4px 10px; background-color: #ef4444; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 11px; outline: none;">${_t('Удалить')}</button>
-                            </td>
-                        `;
-                        brBody.appendChild(tr);
-                    });
-                }
-            }
-        })
-        .catch(err => console.error('Pingcheck sync failed:', err));
-}
-
-function deleteBugreport(filename) {
-    if (!confirm(_t('Вы действительно хотите удалить этот багрепорт?') + '\n' + filename)) return;
-    
-    const url = '<%=luci.dispatcher.build_url("admin/modem/delete_bugreport")%>?file=' + encodeURIComponent(filename);
-    fetch(url)
-        .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                fetchPingcheckData();
-            } else {
-                alert(_t('Не удалось удалить файл'));
-            }
-        })
-        .catch(err => console.error(err));
-}
-
-function clearLogs() {
-    if (!confirm(_t('Вы действительно хотите очистить всю историю переходов?\nЛог pingcheck.log будет полностью стерт.'))) return;
-    
-    const url = '<%=luci.dispatcher.build_url("admin/modem/clear_pingcheck_log")%>';
-    fetch(url)
-        .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                fetchPingcheckData();
-            } else {
-                alert(_t('Не удалось очистить лог'));
-            }
-        })
-        .catch(err => console.error(err));
-}
-
-// Start polling
-function startPolling() {
-    fetchPingcheckData();
-    activePollId = setInterval(fetchPingcheckData, 4000);
-}
-
-// Language Translation Logic
-const dict = {
-    "Фоновая служба мониторинга не запущена!": "Background monitoring service is not running!",
-    "Пожалуйста, проверьте статус службы `/etc/init.d/pingcheck`. Статистика и данные о сбоях могут быть неактуальными.": "Please check the status of the `/etc/init.d/pingcheck` service. Stats and crash data might be outdated.",
-    "Текущее состояние связи": "Current Connection State",
-    "Непрерывная работа:": "Continuous uptime:",
-    "Обновлено:": "Updated:",
-    "Статистика за текущую сессию": "Current Session Statistics",
-    "СБОЕВ ИНТЕРНЕТА:": "INTERNET FAILURES:",
-    "ОБЩЕЕ ВРЕМЯ ПРОСТОЯ:": "TOTAL DOWNTIME:",
-    "Доступность линии:": "Line availability:",
-    "Таймлайн аптайма (История за 24ч)": "Uptime Timeline (24h History)",
-    "Срез времени доступности": "Availability Timeline",
-    "История переходов и инцидентов": "State Transitions & Incidents History",
-    "Очистить лог": "Clear Log",
-    "Архив багрепортов (сбои > 10 секунд)": "Bug Reports Archive (Failures > 10 sec)",
-    "Снимаются автоматически ровно один раз при падении": "Automatically collected exactly once per failure",
-    "Имя файла": "Filename",
-    "Размер": "Size",
-    "Дата сбора": "Gather Date",
-    "Действия": "Actions",
-    "Скачать": "Download",
-    "Удалить": "Delete",
-    "Загрузка логов переходов...": "Loading transition logs...",
-    "Лог мониторинга пуст. Соединение стабильно.": "Monitoring log is empty. Connection is stable.",
-    "Багрепорты не найдены. Сбоев длиннее 10 сек не зафиксировано.": "No bug reports found. No failures longer than 10 sec recorded.",
-    "Сбой длится:": "Failure duration:",
-    "Сбоев:": "Failures:",
-    "Аптайм:": "Uptime:",
-    "Аптайм линии:": "Line Uptime:",
-    "24ч назад": "24h ago",
-    "Вы действительно хотите очистить всю историю переходов?\nЛог pingcheck.log будет полностью стерт.": "Are you sure you want to clear transition history?\nThe pingcheck.log file will be completely erased.",
-    "Вы действительно хотите удалить этот багрепорт?": "Are you sure you want to delete this bug report?",
-    "Не удалось удалить файл": "Failed to delete file",
-    "Не удалось очистить лог": "Failed to clear log",
-    "Время события": "Event Time",
-    "Состояние": "State",
-    "Детали сбоя": "Failure Details",
-    "Начало:": "Start:",
-    "Длительность:": "Duration:",
-    "СБОЙ ИНТЕРНЕТА": "INTERNET FAILURE",
-    "СТАРТ": "START",
-    "Связь успешно восстановлена": "Connection successfully restored",
-    "Соединение прервано": "Connection interrupted",
-    "Мониторинг доступности интернета (Internet Availability)": "Internet Availability Monitoring",
-    "Фоновый контроль соединения на интерфейсе wwan0 с автоматическим сбором логов при сбоях.": "Background connection monitoring on wwan0 interface with automatic crash log gathering."
-};
-
-function _t(str) {
-    if (!str) return str;
-    const lang = localStorage.getItem('modem_lang') || 'ru';
-    if (lang === 'ru') return str;
-    return dict[str] || str;
-}
-
-function changeLanguage(lang) {
-    localStorage.setItem('modem_lang', lang);
-    document.cookie = "modem_lang=" + lang + "; path=/; max-age=31536000";
-    const selects = document.querySelectorAll('#lang_select');
-    selects.forEach(s => s.value = lang);
-    translatePage(lang);
-}
-
-function translatePage(lang) {
-    const elements = document.querySelectorAll('h3, h4, h5, p, label, button, span, strong, option, th, td, a, div, input, select');
-    const sortedKeys = Object.keys(dict).sort((a, b) => b.length - a.length);
-    elements.forEach(el => {
-        // Translate text nodes
-        let hasTextChild = false;
-        for (let node of el.childNodes) {
-            if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0) {
-                hasTextChild = true;
-                break;
-            }
-        }
-        if (hasTextChild) {
-            if (!el.hasAttribute('data-ru')) {
-                el.setAttribute('data-ru', el.innerHTML);
-            }
-            const origRu = el.getAttribute('data-ru');
-            if (lang === 'en') {
-                let translated = origRu;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.innerHTML = translated;
-            } else {
-                el.innerHTML = origRu;
-            }
-        }
-
-        // Translate placeholders
-        if (el.placeholder) {
-            if (!el.hasAttribute('data-placeholder-ru')) {
-                el.setAttribute('data-placeholder-ru', el.placeholder);
-            }
-            const origPl = el.getAttribute('data-placeholder-ru');
-            if (lang === 'en') {
-                let translated = origPl;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.placeholder = translated;
-            } else {
-                el.placeholder = origPl;
-            }
-        }
-
-        // Translate titles
-        if (el.title) {
-            if (!el.hasAttribute('data-title-ru')) {
-                el.setAttribute('data-title-ru', el.title);
-            }
-            const origTitle = el.getAttribute('data-title-ru');
-            if (lang === 'en') {
-                let translated = origTitle;
-                for (let ruStr of sortedKeys) {
-                    const escaped = ruStr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                    const regex = new RegExp(escaped, 'g');
-                    translated = translated.replace(regex, dict[ruStr]);
-                }
-                el.title = translated;
-            } else {
-                el.title = origTitle;
-            }
-        }
-    });
-}
-
-// Initial language setup
-const currentLang = localStorage.getItem('modem_lang') || 'ru';
-document.cookie = "modem_lang=" + currentLang + "; path=/; max-age=31536000";
-const select = document.getElementById('lang_select');
-if (select) select.value = currentLang;
-setTimeout(() => translatePage(currentLang), 100);
-
-setTimeout(startPolling, 500);
-</script>
-
-<%+footer%>
-
-EOF
-
-chmod +x /usr/bin/sms_sync.lua
 chmod +x /usr/bin/modem_speed_daemon.lua
 chmod +x /etc/init.d/modem_speed
 /etc/init.d/modem_speed enable
