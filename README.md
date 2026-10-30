@@ -1,4 +1,5 @@
 Test utils for QC modems (qmi pref) 
+Works only on WH3000pro with my FW, for other - not tested
 
 Description https://t.me/lint_electronics/47 
 
